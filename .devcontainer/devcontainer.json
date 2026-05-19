@@ -1,15 +1,14 @@
 {
   "name": "your-repo-name",
   "image": "ghcr.io/rocker-org/devcontainer/tidyverse:4.4",
-
   "features": {
     "ghcr.io/rocker-org/devcontainer-features/r-packages:1": {
       "packages": "pak,languageserver",
       "installSystemRequirements": true
     },
-    "ghcr.io/devcontainers/features/github-cli:1": {}
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/node:1": {}
   },
-
   "customizations": {
     "vscode": {
       "extensions": [
