@@ -1,90 +1,104 @@
-# CLAUDE.md — [PROJECT NAME]
-
-<!-- 
-  INSTRUCTIONS FOR FILLING IN THIS TEMPLATE:
-  - Replace all text in [SQUARE BRACKETS] with project-specific content
-  - Remove all instruction comments (like this one) before committing
-  - Do not delete any section headings — if a section is not applicable,
-    write "Not applicable to this project" rather than deleting it
--->
+# CLAUDE.md — FluxCourseForecast
 
 ## Lab Principles Source
 
-<!-- Record the commit hash of EcosystemEcologyLab/lab-principles that was
-     used to initialise this project. This makes the version of standards
-     traceable for any published result. -->
-
 - Repository: EcosystemEcologyLab/lab-principles
-- Commit: [PASTE COMMIT HASH HERE — run: git ls-remote https://github.com/EcosystemEcologyLab/lab-principles HEAD]
-- Copied: [DATE]
-- SCIENCE_PRINCIPLES.md [VERSION e.g. v1.0]
-- [SCIENCE_PRINCIPLES_PIPELINES.md v1.0 — include if applicable]
-- [SCIENCE_PRINCIPLES_TEXT_ANALYSIS.md v1.0 — include if applicable]
+- Commit: 11259a0826621be031b6f482cc3780780f2f1dde
+- Copied: 2026-05-19
+- SCIENCE_PRINCIPLES.md v1.0
 
 ---
 
 ## Project Context
 
-<!-- 2–4 sentences describing what this project is, what it produces, and
-     who it is for. Be specific enough that Claude Code can orient itself
-     without needing additional context. -->
+FluxCourseForecast is a teaching repository for the Fluxcourse 2026 course
+(June 7–18, Bloomington, Indiana). It provides annotated R Markdown exercises
+that walk students through running a simple process-based carbon cycle model
+(SSEM, Super Simple Ecosystem Model), comparing its output to eddy covariance
+observations, remote sensing products, FLUXCOM upscaled fluxes, and CMIP6 Earth
+system model output. The primary learning objectives are model validation logic,
+cost function design, and the conceptual differences between simple open-system
+models and full land surface models.
 
-[DESCRIBE THE PROJECT HERE]
-
-**PI:** [Name, institution]  
-**Collaborators:** [Names and institutions if applicable]  
-**Funding:** [Funding source if applicable]  
-**Repository:** https://github.com/EcosystemEcologyLab/[REPO-NAME]  
+**PI:** David J.P. Moore, University of Arizona
+**Collaborators:** Mike Dietze, Boston University (upstream SSEM code and particle filter)
+**Funding:** Not applicable
+**Repository:** https://github.com/davidjpmoore/FluxCourseForecast
+**Upstream:** https://github.com/mdietze/FluxCourseForecast
 
 ---
 
 ## Hard Rules — Read These First
 
-<!-- List the project-specific constraints that Claude Code must never
-     violate. These extend the hard rules in SCIENCE_PRINCIPLES.md.
-     Common examples are given below — keep what applies, add what is
-     missing, remove what is not relevant. -->
-
 ### 1. Data sources
-<!-- Which datasets are permitted? Which are explicitly forbidden?
-     Be specific about product names, versions, and access methods. -->
 
-[DESCRIBE PERMITTED AND FORBIDDEN DATA SOURCES]
+Permitted sources:
+- US-MMS (Morgan Monroe State Forest) FLUXNET data via the EcosystemEcologyLab
+  fluxnet R package (https://github.com/EcosystemEcologyLab/fluxnet-package)
+- FLUXCOM-X-BASE monthly data from the ICOS Carbon Portal
+  (https://doi.org/10.18160/5NZG-JMJE)
+- MODIS LAI for US-MMS via the AmeriFlux MODIS tool
+  (https://ameriflux.lbl.gov/sites/siteinfo/US-MMS#related.modis)
+- CMIP6 output (CESM2, IPSL-CM6A-LR, UKESM1-0-LL) extracted from the Pangeo
+  Google Cloud CMIP6 catalog; pre-extracted CSVs are stored in data/cmip6/
+- SSEM model output generated live by running R/functions.R
+
+Forbidden:
+- Do not download or commit raw FLUXNET zip files — use the fluxnet package only
+- Do not access CMIP6 data from ESGF directly in scripts students will run;
+  use the pre-extracted CSVs in data/cmip6/ only
 
 ### 2. Credentials and secrets
-All credentials must be read from environment variables. Never hard-code
-any credential, API key, password, or token. See `.env.example` for the
-full list of required environment variables.
+
+All credentials must be read from environment variables. Never hard-code any
+credential, API key, password, or token. The fluxnet package handles
+authentication internally; do not expose tokens in scripts.
 
 ### 3. Data files
+
 The following directories are gitignored and must never be committed:
-[LIST GITIGNORED DATA DIRECTORIES e.g. data/raw/, data/processed/]
+- data/raw/
+- data/cmip6/raw/
 
 The following directories are git-tracked:
-[LIST TRACKED DIRECTORIES e.g. data/snapshots/, data/overrides/]
+- data/cmip6/      (pre-extracted CSVs only, small files)
+- data/examples/   (small example datasets used in exercises)
 
-### 4. [ADD PROJECT-SPECIFIC HARD RULES AS NEEDED]
+### 4. Teaching code standards
+
+This is a teaching repository. Code must be heavily annotated in plain language
+that a graduate student encountering the topic for the first time can follow.
+Every non-obvious line should have a comment explaining what it does and why.
+Do not optimise for brevity — optimise for clarity.
+
+### 5. Unit conventions
+
+SSEM outputs carbon fluxes in umol m-2 s-1 and pool sizes in Mg ha-1.
+FLUXNET variables use umol m-2 s-1 for fluxes and standard SI for met drivers.
+FLUXCOM and CMIP6 outputs use kg m-2 s-1 for carbon fluxes and W m-2 for
+energy fluxes. Unit harmonization code must be explicit, annotated, and
+centralised in a single conversion script — never inline and unremarked.
 
 ---
 
 ## Environment Variables
 
-<!-- List all environment variables the project uses. Copy from .env.example. -->
-
 | Variable | Purpose | Default |
 |---|---|---|
-| [VARIABLE_NAME] | [Purpose] | [Default or "required"] |
+| FLUXNET_TOKEN | Authentication for fluxnet shuttle | required |
 
 ---
 
 ## Pipeline Execution Order
 
-<!-- If the project has numbered scripts, list them here with a one-line
-     description of each. If not applicable, remove this section. -->
+This repository does not have a numbered pipeline. The primary deliverable is
+a set of R Markdown documents that are run sequentially by students. Order:
 
 ```
-[01_script.R]   → [What it does]
-[02_script.R]   → [What it does]
+R/functions.R               → SSEM model and particle filter (source this first)
+exercises/01_run_model.Rmd  → Run SSEM, explore output
+exercises/02_validation.Rmd → Load observations, harmonize units, compute cost functions
+data/cmip6/                 → Pre-extracted CSVs, read directly in 02_validation.Rmd
 ```
 
 ---
@@ -92,72 +106,88 @@ The following directories are git-tracked:
 ## Coding Conventions
 
 ### Language and style
-- Primary language: [R / Python / other]
-- [Add style guide reference e.g. tidyverse style guide URL]
-- [Add pipe preference e.g. use base R pipe |> not %>%]
+- Primary language: R
+- Style: tidyverse style guide (https://style.tidyverse.org)
+- Use base R pipe |> not %>%
+- Use tidyverse for data manipulation and ggplot2 for all figures
+- Python is used only for the one-time CMIP6 extraction script; it is not
+  part of the student-facing materials
 
 ### Package preferences
-- [List preferred packages for data manipulation, plotting, etc.]
+- fluxnet (EcosystemEcologyLab) for FLUXNET data access
+- tidyverse, lubridate, ncdf4, tidync for data handling
+- ggplot2 for all visualisation
 - Do not introduce new package dependencies without discussion
 
 ### Functions
-- Every function must have documentation (roxygen2 for R, docstrings for Python)
-- Every function must have at least one test
+- Every function must have a roxygen2 header
+- Teaching helper functions live in R/helpers.R, not inline in Rmd files
 
 ---
 
 ## QC and Quality Standards
 
-<!-- Describe the quality control approach for this project. If using
-     FLUXNET QC flags, use the template below. Otherwise adapt. -->
+FLUXNET data: use NEE_VUT_REF and GPP_NT_VUT_REF as primary variables.
+Retain only records with NEE_VUT_REF_QC >= 0.5 for half-hourly comparisons.
+For daily and annual aggregations, document the gap-filling assumptions explicitly
+in the R Markdown narrative.
 
-[DESCRIBE QC APPROACH AND THRESHOLDS]
+CMIP6 data: pre-extracted and provided as-is. Flag any fill values (typically
+1e20) as NA on load.
 
 ---
 
 ## Confidence and Quality Vocabulary
 
-<!-- State whether this project uses the shared HIGH/MEDIUM/LOW/UNKNOWN
-     vocabulary from SCIENCE_PRINCIPLES.md, or a project-specific system.
-     If using a project-specific system, define it here. -->
-
-[ADOPT OR DEFINE CONFIDENCE VOCABULARY]
+This project uses the shared HIGH / MEDIUM / LOW / UNKNOWN vocabulary from
+SCIENCE_PRINCIPLES.md where applicable. In the teaching context, confidence
+levels on model-data comparisons should be discussed qualitatively with students
+rather than programmatically assigned.
 
 ---
 
 ## Output Metadata
 
-<!-- Every output must carry provenance metadata per SCIENCE_PRINCIPLES_PIPELINES.md.
-     Describe the format used in this project (companion JSON, CSV header, etc.)
-     and where session info is saved. -->
+Each exercise Rmd, when knitted, produces an HTML file. At the top of each Rmd,
+record the date, the R session info, and the git commit hash of the repository.
+Use the following block at the start of every Rmd:
 
-[DESCRIBE OUTPUT METADATA FORMAT]
+```r
+cat("Date:", format(Sys.time(), "%Y-%m-%d %H:%M"), "\n")
+cat("Commit:", system("git rev-parse --short HEAD", intern = TRUE), "\n")
+sessionInfo()
+```
 
 ---
 
 ## Exclusion Logging
 
-<!-- Describe where and how exclusions are logged in this project,
-     per SCIENCE_PRINCIPLES_PIPELINES.md conventions. -->
-
-[DESCRIBE EXCLUSION LOG LOCATION AND FORMAT]
+Not applicable to this project. Exclusions from FLUXNET data are handled by
+QC flags documented in the R Markdown narrative, not in a separate log file.
 
 ---
 
 ## Known Pending Items
 
-<!-- List any known limitations, stopgap functions, or pending upstream
-     fixes that affect this project. Update this list as issues are resolved. -->
-
 | Item | Tracked in |
 |---|---|
-| [Description] | [GitHub issue URL] |
+| CMIP6 extraction script not yet written | to be completed before course |
+| 02_validation.Rmd not yet drafted | in progress |
+| Upstream merge with mdietze/FluxCourseForecast pending | coordinate with Mike Dietze |
 
 ---
 
 ## Data Use and Citation
 
-<!-- List any data use agreements, required citations, or attribution
-     requirements that apply to data used in this project. -->
+FLUXNET / AmeriFlux US-MMS data are shared under CC-BY-4.0. Cite the site
+team and the AmeriFlux network per the data download agreement. Citation
+information is returned by flux_listall() in the fluxnet package.
 
-[LIST REQUIRED CITATIONS AND DATA USE OBLIGATIONS]
+FLUXCOM-X-BASE: cite Nelson et al. (2024), Biogeosciences, and the ICOS
+Carbon Portal DOI (https://doi.org/10.18160/5NZG-JMJE).
+
+CMIP6 data: cite the modelling groups for each model used (CESM2, IPSL-CM6A-LR,
+UKESM1-0-LL) per the CMIP6 data use guidelines
+(https://pcmdi.llnl.gov/CMIP6/TermsOfUse).
+
+SSEM model code: cite Mike Dietze and the mdietze/FluxCourseForecast repository.
