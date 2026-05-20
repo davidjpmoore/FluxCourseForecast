@@ -79,6 +79,12 @@ FLUXCOM and CMIP6 outputs use kg m-2 s-1 for carbon fluxes and W m-2 for
 energy fluxes. Unit harmonization code must be explicit, annotated, and
 centralised in a single conversion script — never inline and unremarked.
 
+### 6. Git operations
+Never run git add, git commit, git push, git merge, or any other git write
+operation without explicit human approval in the current session. Always
+show the proposed commit message and list of changed files and wait for
+confirmation before proceeding.
+
 ---
 
 ## Environment Variables
@@ -191,3 +197,5 @@ UKESM1-0-LL) per the CMIP6 data use guidelines
 (https://pcmdi.llnl.gov/CMIP6/TermsOfUse).
 
 SSEM model code: cite Mike Dietze and the mdietze/FluxCourseForecast repository.
+
+
