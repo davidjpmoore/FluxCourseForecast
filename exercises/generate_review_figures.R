@@ -268,7 +268,15 @@ for (site_label in names(site_configs)) {
   # ── SSEM: parameters and initial conditions ──────────────────────────────────
   # Initial pool sizes (Mg C ha⁻¹): uniform across ensemble members;
   # prior uncertainty is expressed entirely through the parameter distributions.
-  X      <- matrix(c(3.0, 100.0, 100.0), nrow = ne, ncol = 3, byrow = FALSE)
+  # IMPORTANT: do NOT use matrix(c(3.0, 100.0, 100.0), nrow=ne, ncol=3).
+  # matrix() fills by column and recycles the 3-element vector across all
+  # 300 elements, so only ~33 of 100 ensemble members would get Bleaf = 3.0;
+  # the rest start at 100 — driving LAI ~50x too high and GPP ~2x observed.
+  # Explicit column assignment is the only safe way to initialize each pool.
+  X      <- matrix(NA_real_, nrow = ne, ncol = 3)
+  X[, 1] <- 3.0    # Bleaf: leaf biomass (Mg C ha-1)
+  X[, 2] <- 100.0  # Bwood: wood biomass (Mg C ha-1)
+  X[, 3] <- 100.0  # BSOM: soil organic matter (Mg C ha-1)
   params <- make_params(cfg$veg_type, cfg$step_mins, ne)
   inputs <- raw |> select(PAR, temp) |> as.data.frame()
 
@@ -540,6 +548,12 @@ usmms_raw  <- read_csv("data/US-MMS/US-MMS_DD.csv",                 show_col_typ
 
 harmonise_cmip6 <- function(df, model_label) {
   df |>
+    # The standard CMIP6 missing/fill value is 1e20. We use a threshold of
+    # 1e19 — one order of magnitude below the fill — to catch any fill values
+    # while safely excluding all physically plausible flux magnitudes. This
+    # must be applied before unit conversion; 1e20 * KGC_S_TO_GC_DAY would
+    # otherwise produce a very large but finite number rather than NA.
+    mutate(across(where(is.numeric), \(x) ifelse(x > 1e19, NA_real_, x))) |>
     mutate(
       model      = model_label,
       gpp_gCm2d  = gpp_kgC_m2_s * KGC_S_TO_GC_DAY,
@@ -586,7 +600,7 @@ for (chosen_model in c("CESM2", "IPSL-CM6A-LR", "UKESM1-0-LL")) {
   message("\n=== Figure: ", fname, " ===")
 
   cmip6_chosen <- cmip6_all |>
-    filter(model == chosen_model) |>
+    filter(model == chosen_model, year >= 1999, year <= 2014) |>
     mutate(date = as.Date(paste(year, month, "01", sep = "-")))
 
   cmip6_long <- cmip6_chosen |>

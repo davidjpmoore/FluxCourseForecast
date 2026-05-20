@@ -254,21 +254,23 @@ set.seed(2026)
 # equilibrium from arbitrary initial conditions) would give more defensible
 # starting values; for this exercise we use literature-based estimates for a
 # mature Norway spruce stand.
-X <- matrix(
-  data = c(
-      3.0,   # Bleaf: spruce needle carbon. Literature values for mature Picea
-             #   abies stands: 2–5 Mg C ha⁻¹. Needles live ~4 years; at any
-             #   moment roughly four cohorts are present.
-    100.0,   # Bwood: stem + coarse root carbon. Mature managed spruce in
-             #   central Europe: 80–150 Mg C ha⁻¹ (varies with age and site).
-    100.0    # BSOM: soil organic carbon to 1 m depth. Temperate forest mineral
-             #   soils typically store 50–150 Mg C ha⁻¹; organic horizons under
-             #   spruce can push this higher.
-  ),
-  nrow  = ne,
-  ncol  = 3,
-  byrow = FALSE   # each column is one pool; rows are ensemble members
-)
+# NOTE (bug fix): the original code used matrix(c(3.0, 100.0, 100.0), nrow=ne,
+# ncol=3, byrow=FALSE). Because matrix() fills column-by-column and recycles,
+# only ~33 of the ne ensemble members received Bleaf = 3.0; the remaining ~67
+# started at Bleaf = 100 or 100, inflating initial LAI by 50x and GPP by ~2x.
+# Explicit column assignment below is the correct approach.
+X <- matrix(NA_real_, nrow = ne, ncol = 3)
+# Bleaf: spruce needle carbon (Mg C ha-1). Literature values for mature
+# Picea abies: 2-5 Mg C ha-1. Needles live ~4 years; at any moment
+# roughly four cohorts are present.
+X[, 1] <- 3.0
+# Bwood: stem + coarse root carbon (Mg C ha-1). Mature managed spruce
+# in central Europe: 80-150 Mg C ha-1 (varies with stand age and site).
+X[, 2] <- 100.0
+# BSOM: soil organic carbon to 1 m depth (Mg C ha-1). Temperate forest
+# mineral soils typically store 50-150 Mg C ha-1; organic horizons
+# under spruce can push this higher.
+X[, 3] <- 100.0
 
 # ── Parameter ensemble ────────────────────────────────────────────────────────
 # We draw ne realisations of each parameter from a probability distribution
