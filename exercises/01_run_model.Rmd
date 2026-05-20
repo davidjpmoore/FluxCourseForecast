@@ -1,0 +1,503 @@
+---
+title: "Exercise 01 — Running the Super Simple Ecosystem Model"
+subtitle: "Fluxcourse 2026 · Bloomington, Indiana"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r metadata, echo=TRUE}
+# Reproducibility header: record when this document was knitted, which
+# commit of the repository it came from, and the full R environment.
+# This block runs automatically every time you knit and appears in the HTML.
+cat("Date:", format(Sys.time(), "%Y-%m-%d %H:%M"), "\n")
+cat("Commit:", system("git rev-parse --short HEAD", intern = TRUE), "\n")
+sessionInfo()
+```
+
+---
+
+## Introduction
+
+In the lectures you heard how most land surface models (LSMs) share a common
+conceptual skeleton: carbon enters the ecosystem through photosynthesis, gets
+partitioned among plant tissues, and eventually returns to the atmosphere via
+autotrophic and heterotrophic respiration. The Super Simple Ecosystem Model
+(SSEM) implements exactly that skeleton in its most stripped-down form.
+Incoming light drives a light-use-efficiency calculation of gross primary
+production (GPP); a fixed fraction of GPP is respired immediately as
+autotrophic respiration (Ra) and the remainder is allocated between leaf and
+wood growth; dead organic matter accumulates in a soil pool and decomposes at a
+rate set by air temperature and a Q10 temperature sensitivity. There is no
+energy balance, no water cycle, no nitrogen limitation, no phenology trigger, no
+multi-layer canopy. That radical simplicity is intentional: because every arrow
+of carbon can be traced from a single equation to a plotted output, SSEM is
+ideal for developing a rigorous intuition for what process-based models actually
+compute — and for diagnosing what goes wrong when they fail.
+
+In this exercise you will run SSEM at the Tharandt spruce forest in Saxony,
+Germany (FLUXNET site DE-Tha) for one calendar year, using only measured
+shortwave radiation and air temperature as meteorological drivers. You will
+examine the seasonal structure of the model output — GPP, net ecosystem
+production (NEP), and carbon pool trajectories — and begin the core practice of
+model evaluation: asking whether the output is physically plausible, and
+identifying what observations would be required to answer that question more
+rigorously. You are not yet comparing against observations; that is Exercise 02.
+The goal here is to build a clear mental picture of what SSEM simulates and
+what it deliberately ignores.
+
+---
+
+## Setup {.tabset}
+
+```{r setup, message=FALSE, warning=FALSE}
+# ── Libraries ─────────────────────────────────────────────────────────────────
+# tidyverse loads dplyr (data manipulation), ggplot2 (figures), readr (fast
+# CSV loading), tidyr (reshaping), and several other packages in one call.
+library(tidyverse)
+
+# lubridate provides convenient date-time parsing and arithmetic.
+# We use it to parse FLUXNET ISO 8601 timestamps and filter by calendar year.
+library(lubridate)
+
+# ── Source the model code ─────────────────────────────────────────────────────
+# R/functions.R contains the full SSEM implementation:
+#   SSEM()              — core model: one 30-minute carbon cycle step
+#   ensemble_forecast() — runs SSEM forward through an entire driver time series
+#                         NOTE: uses 'ne' from the global environment (see Chunk 3)
+#   ParticleFilter()    — sequential data assimilation (used in Exercise 02)
+#   plot_forecast()     — 12-panel output summary with uncertainty envelopes
+#   plot_params()       — diagnostic density plots of parameter distributions
+#   rdirichlet.orig()   — draws from a Dirichlet distribution; used to sample
+#                         carbon allocation fractions that must sum to 1
+#   beta.match()        — Beta distribution moment matching for turnover priors
+#   flux.uncertainty()  — heteroskedastic flux error model (Exercise 02)
+#   varnames, units     — character vectors naming the 12 model output variables
+source("../R/functions.R")
+
+# R/utils.R contains lower-level helper functions:
+#   ciEnvelope()    — draws a shaded credible interval polygon on a base R plot
+#   col.alpha()     — adds alpha transparency to a colour specification
+#   wtd.quantile()  — quantile function that respects particle filter weights
+#   solar_geom()    — computes potential top-of-atmosphere shortwave radiation
+#   mat2mcmc.list() — converts parameter matrices to CODA mcmc.list objects
+source("../R/utils.R")
+```
+
+---
+
+## Load and inspect drivers
+
+```{r drivers, message=FALSE, fig.width=10, fig.height=6,
+    fig.cap="Half-hourly PAR and air temperature at DE-Tha during 2000. Each vertical spike in PAR is one day's sunlight; the seasonal envelope shows peak insolation in June–July. Temperature drops below zero during winter."}
+
+# ── Read the DE-Tha site data ─────────────────────────────────────────────────
+# DE-Tha is a managed Norway spruce plantation (Picea abies) in Tharandt,
+# Saxony, Germany. It has been a continuous FLUXNET site since 1996, making
+# it one of the longest eddy covariance records in Europe. The _HH suffix
+# denotes the half-hourly (HH) product: one row per 30-minute period.
+drivers_raw <- read_csv(
+  "../data/DE-Tha/DE-Tha_HH.csv",
+  show_col_types = FALSE
+)
+
+# FLUXNET uses -9999 as a sentinel for missing observations (not the same as
+# a true zero). Replace these with NA so R treats them as missing data rather
+# than including them in calculations.
+drivers_raw <- drivers_raw |>
+  mutate(across(where(is.numeric), \(x) replace(x, x == -9999, NA)))
+
+# ── Filter to one calendar year ───────────────────────────────────────────────
+# We use the year 2000: a meteorologically representative year for this site
+# with no major disturbance events, giving a clean seasonal cycle to study.
+# Year 2000 is a leap year (366 days × 48 half-hour periods = 17,568 rows).
+# After you have worked through this exercise, try a different year and
+# compare the shape of the model output — interannual variability is real and
+# the model will reflect the variability in the drivers.
+drivers <- drivers_raw |>
+  mutate(
+    # Parse the ISO 8601 timestamp. The trailing "Z" indicates UTC;
+    # ymd_hms() handles this automatically.
+    datetime = ymd_hms(DATETIME_START)
+  ) |>
+  filter(year(datetime) == 2000) |>
+  select(datetime, SW_IN_F, TA_F)
+
+# Confirm the expected row count. A leap year has 366 × 48 = 17,568 rows.
+cat("Timesteps in 2000:", nrow(drivers), "(expect 17,568 for a leap year)\n")
+
+# ── Convert to model input units ──────────────────────────────────────────────
+# SSEM's photosynthesis routine expects exactly two driver columns:
+#   PAR  — photosynthetically active radiation (μmol photon m⁻² s⁻¹)
+#   temp — air temperature (°C)
+#
+# SW_IN_F is gap-filled incoming shortwave radiation in W m⁻².
+# PAR occupies the 400–700 nm waveband, roughly 45% of total shortwave.
+# Within that waveband, 1 W m⁻² ≈ 4.6 μmol photons.
+# Combined: PAR (μmol m⁻² s⁻¹) ≈ SW_IN_F (W m⁻²) × 0.45 × 4.6 ≈ SW_IN_F × 2.1
+# We floor at 0 because sensors occasionally report tiny negative values at night
+# due to calibration drift; the model does not allow negative PAR.
+#
+# TA_F is gap-filled air temperature already in °C — no unit conversion needed.
+drivers <- drivers |>
+  mutate(
+    PAR  = pmax(SW_IN_F * 2.1, 0),
+    temp = TA_F
+  )
+
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │  TIMESTEP NOTE — important if you switch sites                              │
+# │                                                                             │
+# │  DE-Tha (this script) and DK-Sor both use the FLUXNET "_HH_" half-hourly  │
+# │  product: one row every 30 minutes → 48 rows per calendar day.             │
+# │                                                                             │
+# │  US-MMS uses the AmeriFlux "_HR_" hourly product (see the note at the      │
+# │  bottom of this chunk): one row per hour → 24 rows per calendar day.       │
+# │                                                                             │
+# │  SSEM itself has no fixed timestep requirement — it loops over whatever    │
+# │  rows you supply. But the number of rows per day affects two things:       │
+# │                                                                             │
+# │  1. The x-axis of plot_forecast() counts timestep numbers, not dates.      │
+# │     For DE-Tha, step 48 = end of day 1; for US-MMS it would be step 24.   │
+# │                                                                             │
+# │  2. In Exercise 02, converting model output from μmol m⁻² s⁻¹ (a rate)   │
+# │     to gC m⁻² day⁻¹ (a daily total) requires multiplying by the step      │
+# │     length in seconds: 1800 s for 30-min sites, 3600 s for hourly sites.  │
+# │     Using the wrong value introduces a factor-of-two error in daily totals │
+# │     for US-MMS — easy to miss, hard to diagnose in a plot.                │
+# │                                                                             │
+# │  If you switch to US-MMS or DK-Sor data: (a) replace the file path above, │
+# │  (b) update the expected-row-count comment (17,568 → 8,784 for US-MMS in  │
+# │  a leap year), and (c) pass the correct step length to the unit conversion │
+# │  in Exercise 02 via the site_timestep list defined in Chunk 1 of that Rmd. │
+# └─────────────────────────────────────────────────────────────────────────────┘
+
+# ── What does SSEM ignore? ────────────────────────────────────────────────────
+# PAR and temperature are sufficient to drive SSEM's two central equations:
+#   GPP = α × (1 − exp(−0.5 × LAI)) × PAR       [light use efficiency model]
+#   Rh  = Rbasal × BSOM × Q10^(temp / 10)        [Q10 soil decomposition model]
+#
+# A full LSM would also require:
+#   • Precipitation / soil moisture  — drought limits stomatal conductance and
+#     slows decomposition; SSEM cannot simulate any water stress.
+#   • Vapour pressure deficit (VPD)  — high VPD closes stomata, reducing GPP;
+#     SSEM's LUE is a fixed parameter, not a VPD-responsive one.
+#   • Leaf nitrogen / Vcmax          — N availability sets the photosynthetic
+#     capacity; SSEM lumps this entirely into the α parameter.
+#   • Phenology (budburst, leaf-off) — SSEM keeps Bleaf roughly constant;
+#     there is no spring green-up or autumn senescence signal.
+# You will see the consequences of these omissions when you compare the output
+# against observations in Exercise 02.
+
+# ── Plot the drivers ──────────────────────────────────────────────────────────
+# Plotting the raw half-hourly data (rather than daily means) shows the diurnal
+# cycle embedded within the seasonal trend — both matter for model behaviour
+# because SSEM calculates GPP every 30 minutes.
+drivers |>
+  select(datetime, PAR, temp) |>
+  pivot_longer(
+    cols      = c(PAR, temp),
+    names_to  = "variable",
+    values_to = "value"
+  ) |>
+  mutate(
+    # Create human-readable labels for the facet panels.
+    label = case_when(
+      variable == "PAR"  ~ "PAR (μmol photon m⁻² s⁻¹)",
+      variable == "temp" ~ "Air temperature (°C)"
+    )
+  ) |>
+  ggplot(aes(x = datetime, y = value)) +
+    geom_line(linewidth = 0.1, alpha = 0.35, colour = "grey20") +
+    # Free y-axis scales because PAR and temperature are on completely
+    # different scales; a shared axis would compress one variable unreadably.
+    facet_wrap(~ label, ncol = 1, scales = "free_y") +
+    labs(
+      title   = "Meteorological drivers — DE-Tha 2000",
+      subtitle = "Half-hourly; PAR converted from SW_IN_F (W m⁻²) × 2.1",
+      x        = NULL,
+      y        = NULL
+    ) +
+    theme_classic(base_size = 12) +
+    theme(strip.background = element_blank(),
+          strip.text        = element_text(face = "bold"))
+```
+
+---
+
+## Parameters and initial conditions
+
+```{r parameters}
+# ── Ensemble size ─────────────────────────────────────────────────────────────
+# ensemble_forecast() reads 'ne' from the global environment — it must be
+# defined before you call the function. A larger ne samples parameter
+# uncertainty more thoroughly but increases run time in direct proportion.
+# 100 members gives a stable uncertainty envelope for exploratory work.
+ne <- 100
+
+# Fix the random seed so your results match this document exactly.
+# Change the seed to explore a different realisation of the ensemble.
+set.seed(2026)
+
+# ── Initial carbon pool sizes (X) ─────────────────────────────────────────────
+# SSEM tracks three carbon pools, all in Mg C ha⁻¹:
+#   column 1 — Bleaf:  leaf carbon
+#   column 2 — Bwood:  wood (stem + coarse root) carbon
+#   column 3 — BSOM:   soil organic carbon
+#
+# Every row of X is one ensemble member. All members start from the same
+# point here because we are expressing our prior uncertainty entirely through
+# the parameter distributions below. A spin-up run (running the model to
+# equilibrium from arbitrary initial conditions) would give more defensible
+# starting values; for this exercise we use literature-based estimates for a
+# mature Norway spruce stand.
+X <- matrix(
+  data = c(
+      3.0,   # Bleaf: spruce needle carbon. Literature values for mature Picea
+             #   abies stands: 2–5 Mg C ha⁻¹. Needles live ~4 years; at any
+             #   moment roughly four cohorts are present.
+    100.0,   # Bwood: stem + coarse root carbon. Mature managed spruce in
+             #   central Europe: 80–150 Mg C ha⁻¹ (varies with age and site).
+    100.0    # BSOM: soil organic carbon to 1 m depth. Temperate forest mineral
+             #   soils typically store 50–150 Mg C ha⁻¹; organic horizons under
+             #   spruce can push this higher.
+  ),
+  nrow  = ne,
+  ncol  = 3,
+  byrow = FALSE   # each column is one pool; rows are ensemble members
+)
+
+# ── Parameter ensemble ────────────────────────────────────────────────────────
+# We draw ne realisations of each parameter from a probability distribution
+# that represents our prior uncertainty about the true value at this site.
+# The spread propagates through the model and appears as the grey uncertainty
+# envelope in Chunk 4. Wider priors → wider envelopes → more honest
+# representation of what we do not know.
+params <- data.frame(
+
+  # α (alpha): canopy light use efficiency
+  #   The slope of the GPP–PAR relationship: GPP = α × Beer's law × PAR
+  #   Units: μmol CO₂ per μmol photon absorbed (dimensionless ratio)
+  #   In a full LSM: derived from leaf-level Vcmax and Jmax through the
+  #   Farquhar model; here compressed into one empirical constant.
+  #   Norway spruce literature: 0.01–0.03 μmol μmol⁻¹ (Medlyn et al. 2003).
+  alpha = rnorm(ne, mean = 0.02, sd = 0.003) |> pmax(0),
+
+  # SLA: specific leaf area
+  #   Converts leaf carbon mass to leaf area: LAI = Bleaf × SLA × 0.1
+  #   (the 0.1 converts Mg ha⁻¹ to kg m⁻² for unit consistency).
+  #   Units: m² leaf area per kg leaf dry mass
+  #   In a full LSM: read from trait databases (TRY); Norway spruce: 4–12 m² kg⁻¹.
+  SLA = rnorm(ne, mean = 8.0, sd = 1.2) |> pmax(1),
+
+  # Rbasal: basal heterotrophic respiration rate
+  #   Rh = Rbasal × BSOM × Q10^(temp / 10)
+  #   Units: μmol CO₂ m⁻² s⁻¹ per Mg C ha⁻¹ of soil organic carbon.
+  #   Interpretation: with BSOM = 100 Mg C ha⁻¹ and temp = 10 °C,
+  #   Rbasal = 0.015 gives Rh ≈ 3 μmol m⁻² s⁻¹ — within the observed
+  #   range for temperate forest soils (Janssens et al. 2001).
+  #   In a full LSM: fitted from soil incubation data or inferred from the
+  #   seasonal Rh–temperature relationship in flux tower data.
+  Rbasal = rnorm(ne, mean = 0.015, sd = 0.003) |> pmax(0),
+
+  # Q10: temperature sensitivity of heterotrophic respiration
+  #   Each 10 °C increase in soil temperature multiplies Rh by Q10.
+  #   Dimensionless; meta-analyses report 1.4–2.5; canonical value = 2.
+  #   In a full LSM: fitted from soil warming experiments or from the
+  #   slope of the seasonal Rh–temperature relationship at the tower.
+  Q10 = rnorm(ne, mean = 2.0, sd = 0.3) |> pmax(1),
+
+  # litterfall: fraction of leaf C transferred to BSOM per 30-min timestep
+  #   Norway spruce needles live on average ~4 years, so ~25% of Bleaf
+  #   falls to the soil each year: 0.25 / (365 × 48) ≈ 1.4 × 10⁻⁵ per step.
+  #   Units: dimensionless fraction per 30-min timestep
+  #   In a full LSM: output of a phenology model (budburst + senescence dates
+  #   driven by photoperiod and temperature); SSEM treats it as constant.
+  litterfall = rnorm(ne, mean = 1.4e-5, sd = 1.5e-6) |> pmax(0),
+
+  # mortality: fraction of wood C transferred to BSOM per 30-min timestep
+  #   Includes stem death and coarse root turnover. Managed spruce in Europe
+  #   is harvested on ~80-year rotations → ~1.25% yr⁻¹ carbon loss from Bwood.
+  #   Per 30-min step: 0.0125 / (365 × 48) ≈ 7.1 × 10⁻⁷
+  #   Units: dimensionless fraction per 30-min timestep
+  #   In a full LSM: output of a demographic or disturbance model.
+  mortality = rnorm(ne, mean = 7.1e-7, sd = 7e-8) |> pmax(0),
+
+  # sigma.leaf, sigma.stem, sigma.soil: process noise standard deviations
+  #   Gaussian noise added to each pool at every timestep to represent model
+  #   structural error — the cumulative mismatch between what the equations
+  #   predict and what the real ecosystem does (missing processes, parameter
+  #   error, numerical discretisation). Units: Mg C ha⁻¹.
+  #   The particle filter (Exercise 02) can estimate these from the data.
+  #   Leaf pool is small and tightly coupled to inputs, so gets smaller noise.
+  sigma.leaf = rep(0.01, ne),
+  sigma.stem = rep(0.10, ne),
+  sigma.soil = rep(0.10, ne)
+)
+
+# ── Carbon allocation fractions ───────────────────────────────────────────────
+# SSEM splits GPP into three competing fates; their fractions must sum to 1
+# for every ensemble member. We draw from a Dirichlet distribution, which is
+# the correct prior for a probability simplex (values in [0,1] summing to 1).
+#
+# Concentration parameters control the expected proportions:
+#   falloc.1 → Ra (autotrophic respiration)  : 5 / 10 = 50% expected
+#   falloc.2 → NPPwood (wood growth)         : 3 / 10 = 30% expected
+#   falloc.3 → NPPleaf (leaf growth)         : 2 / 10 = 20% expected
+#
+# These are consistent with a carbon use efficiency (CUE = NPP/GPP) of ~0.50,
+# which is close to the observed mean for temperate forests (Malhi 2012).
+# Larger concentration values reduce the spread across ensemble members.
+falloc <- rdirichlet.orig(ne, alpha = c(5, 3, 2))
+params$falloc.1 <- falloc[, 1]   # fraction of GPP → Ra
+params$falloc.2 <- falloc[, 2]   # fraction of GPP → wood NPP
+params$falloc.3 <- falloc[, 3]   # fraction of GPP → leaf NPP
+
+# Verify the constraint holds for every ensemble member.
+stopifnot(
+  all(abs(rowSums(params[, c("falloc.1", "falloc.2", "falloc.3")]) - 1) < 1e-10)
+)
+
+# Print the parameter ensemble summary so you can see the prior spread.
+cat("\nParameter ensemble: mean ± SD across", ne, "members\n")
+cat(sprintf("  %-12s  %10s  %10s\n", "parameter", "mean", "SD"))
+cat(rep("-", 38), "\n", sep = "")
+for (p in names(params)) {
+  cat(sprintf("  %-12s  %10.3g  %10.3g\n", p, mean(params[[p]]), sd(params[[p]])))
+}
+```
+
+---
+
+## Run the model and examine output
+
+```{r model_run, cache=TRUE, fig.width=12, fig.height=10,
+    fig.cap="SSEM ensemble output for DE-Tha 2000. Grey envelope: 95% credible interval across 100 ensemble members. Dark line: ensemble median. x-axis: 30-minute timestep number (48 steps = 1 day; 17,568 steps = full leap year)."}
+
+# ── Assemble inputs ───────────────────────────────────────────────────────────
+# ensemble_forecast() expects a plain data.frame with exactly the columns
+# 'PAR' and 'temp', one row per model timestep. The function loops over rows
+# in chronological order, passing each row to SSEM() as the current drivers.
+inputs <- drivers |>
+  select(PAR, temp) |>
+  as.data.frame()   # convert from tibble; some internal indexing expects data.frame
+
+# Confirm dimensions match: inputs must have one row per timestep.
+cat("Input rows:", nrow(inputs), " | Expected (leap year):", 17568, "\n")
+
+# ── Run the ensemble ──────────────────────────────────────────────────────────
+# ensemble_forecast() runs all ne ensemble members forward simultaneously.
+# It reads 'ne' from the global environment (defined in the previous chunk).
+# A counter prints every 336 steps (= 7 days); for a leap year expect ~52 lines.
+# Run time is approximately 2–4 minutes on a modern laptop.
+#
+# The returned object is a 3-D array:
+#   dim 1 — timestep          (one 30-min step per row)
+#   dim 2 — ensemble member   (ne columns)
+#   dim 3 — output variable   (12 variables; see list below)
+#
+# Variable index → name → units:
+#    1  Bleaf      leaf carbon            Mg C ha⁻¹
+#    2  Bwood      wood carbon            Mg C ha⁻¹
+#    3  BSOM       soil organic carbon    Mg C ha⁻¹
+#    4  LAI        leaf area index        m² m⁻²
+#    5  GPP        gross primary prod.    μmol CO₂ m⁻² s⁻¹
+#    6  NEP        net ecosystem prod.    μmol CO₂ m⁻² s⁻¹
+#    7  Ra         autotrophic resp.      μmol CO₂ m⁻² s⁻¹
+#    8  NPPw       wood net prim. prod.   μmol CO₂ m⁻² s⁻¹
+#    9  NPPl       leaf net prim. prod.   μmol CO₂ m⁻² s⁻¹
+#   10  Rh         heterotrophic resp.    μmol CO₂ m⁻² s⁻¹
+#   11  litterfall leaf C to soil         Mg C ha⁻¹ per timestep
+#   12  mortality  wood C to soil         Mg C ha⁻¹ per timestep
+message("Starting model run — expect 2–4 minutes …")
+output <- ensemble_forecast(X, params, inputs)
+
+cat("\nOutput array dimensions [timesteps × ensemble members × variables]:\n")
+print(dim(output))
+
+# ── What does the ensemble spread represent? ──────────────────────────────────
+# Each ensemble member carries a different parameter set drawn from the
+# distributions in Chunk 3. When run forward, those differences compound over
+# time into diverging pool trajectories and flux time series. The width of the
+# 95% envelope at any timestep is therefore a direct measure of forecast
+# uncertainty arising from parameter uncertainty. A wide envelope means the
+# model output is sensitive to that source of uncertainty; a narrow envelope
+# means the model is relatively insensitive to it. In Exercise 02 you will
+# use eddy covariance NEP observations to weight ensemble members by
+# how well they match the data — the particle filter — collapsing the
+# envelope where observations provide information and leaving it wide where
+# they do not.
+
+# ── Plot all 12 output variables ──────────────────────────────────────────────
+# plot_forecast() (from R/functions.R) computes the 2.5th, 50th, and 97.5th
+# percentiles of the ensemble at each timestep and renders them as a shaded
+# ribbon (ciEnvelope) around the median line. The function uses base R graphics
+# rather than ggplot2 because it is from the upstream SSEM repository; we call
+# it unchanged.
+par(mfrow = c(4, 3),           # 4 rows × 3 columns = 12 panels for 12 variables
+    mar   = c(3, 4, 3, 0.5))  # tighter margins so all panels fit comfortably
+plot_forecast(output)
+
+# Reset to single-panel layout for any subsequent plots.
+par(mfrow = c(1, 1), mar = c(5, 4, 4, 2) + 0.1)
+
+# ── Save output for Exercise 02 ───────────────────────────────────────────────
+# Exercise 02 loads this RDS to compare SSEM output against observations.
+# Saving here means you only need to run Exercise 01 once; re-knitting
+# Exercise 02 will always find the file even without re-running the model.
+saveRDS(output, "../data/ssem_detha_2000.rds")
+message("Saved SSEM output → data/ssem_detha_2000.rds")
+
+# ── Explore further ───────────────────────────────────────────────────────────
+# Half-hourly driver data are available for two additional temperate forest sites:
+#
+#   data/DK-Sor/DK-Sor_HH.csv
+#     Soroe, Denmark — European beech forest (Fagus sylvatica); deciduous,
+#     so it has a very pronounced spring green-up and autumn leaf-off. Contrast
+#     the seasonal GPP shape with DE-Tha.
+#
+#   data/US-MMS/  (daily and monthly only for this site; no HH file)
+#     Morgan Monroe State Forest, Indiana — mixed deciduous broadleaf forest;
+#     warmer summers and colder winters than Germany.
+#
+# To run SSEM at DK-Sor, replace DE-Tha_HH.csv with DK-Sor_HH.csv in Chunk 2
+# and re-knit. Consider: does an evergreen model structure make sense for beech?
+```
+
+---
+
+## Discussion questions
+
+Work through the following questions before moving on to Exercise 02. There
+are no single correct answers; the goal is to reason from what you know about
+forest carbon cycling and what you can see in the model output panels above.
+
+**1. Seasonal pattern of GPP.** Examine the GPP panel. Describe the seasonal
+trajectory: when does GPP peak, when does it drop toward zero, and does the
+shape match your expectation for a temperate Norway spruce forest? Spruce is
+an evergreen conifer — unlike a beech or oak it retains its needles year-round
+and can photosynthesize on warm winter days. Does the output reflect that
+possibility? Think about what the light-use-efficiency formulation assumes
+about stomatal behaviour in cold or dry conditions, and consider whether that
+assumption is likely to exaggerate or suppress winter GPP at this site.
+
+**2. Information needed to evaluate the output.** You have a model trajectory
+but no observational reference to compare it against. List the data streams that
+would allow you to assess whether this output is realistic, and for each one
+note: (a) which model variable or flux it constrains most directly, (b) the
+typical measurement uncertainty you would need to account for, and (c) any
+mismatch in temporal or spatial scale between the observation and the model
+output. Consider both eddy covariance fluxes available at DE-Tha through the
+FLUXNET archive and independent pool-level measurements such as forest
+inventory biomass, litter trap data, or soil carbon surveys.
+
+**3. Ensemble spread and forecast uncertainty.** Compare the width of the grey
+uncertainty envelope across the 12 panels. Which state variables or fluxes
+show the widest spread relative to their magnitude, and which are tightly
+constrained? What does this pattern tell you about which parameters dominate
+forecast uncertainty? If you could make one additional field measurement to
+reduce the uncertainty in the carbon-cycle forecast, which measurement would
+you choose, and why?

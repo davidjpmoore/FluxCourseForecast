@@ -1,0 +1,938 @@
+---
+title: "Exercise 02 — Validating the Super Simple Ecosystem Model"
+subtitle: "Fluxcourse 2026 · Bloomington, Indiana"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r metadata, echo=TRUE}
+cat("Date:", format(Sys.time(), "%Y-%m-%d %H:%M"), "\n")
+cat("Commit:", system("git rev-parse --short HEAD", intern = TRUE), "\n")
+sessionInfo()
+```
+
+---
+
+## Introduction
+
+Running a model and validating a model are different activities. In Exercise 01
+you ran SSEM and confirmed it produces plausible-looking output. That is a
+necessary first step, but it is not validation: the model could produce any
+seasonal cycle you chose simply by adjusting its parameters, and there is no
+way to know whether its numbers are right without confronting them with
+independent observations. Validation requires data that the model has not
+already seen, measured at a spatial and temporal scale that actually matches
+what the model simulates, and processed consistently enough that you are
+comparing the same quantity. Each of those three conditions is harder to satisfy
+than it sounds, and failing to notice a mismatch in any one of them is one of
+the most common sources of spurious conclusions in model-data comparison studies.
+
+This exercise takes you through that comparison work. You will bring together
+four observational data streams — eddy covariance flux tower records from three
+temperate forest sites (DE-Tha in Germany, DK-Sor in Denmark, US-MMS in
+Indiana), FLUXCOM upscaled flux estimates, MODIS-derived LAI, and output from
+one Earth system model (ESM) of your choice from the CMIP6 archive — and you
+will compare all of them against each other and against SSEM. The sites span
+two vegetation types: DE-Tha and DK-Sor are temperate European forests (a
+Norway spruce plantation and a beech forest respectively), while US-MMS is a
+mixed deciduous broadleaf forest in the Midwest. Together they expose the range
+of carbon-cycle behaviour that a simple model like SSEM must explain — and
+frequently cannot.
+
+---
+
+## Setup
+
+> **Before you start:** This exercise loads the SSEM ensemble output array
+> that was computed in Exercise 01. To make that file available, open
+> `exercises/01_run_model.Rmd`, knit it once to completion, and then run the
+> following line in the R console (or add it to the end of the `model_run`
+> chunk and re-knit):
+>
+> ```r
+> saveRDS(output, "../data/ssem_detha_2000.rds")
+> ```
+>
+> Once that file exists on disk, this document is self-contained.
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)   # dplyr, ggplot2, readr, tidyr, purrr, lubridate wrapper
+library(lubridate)   # date arithmetic, ymd(), days_in_month()
+
+# R/functions.R: SSEM model, ensemble_forecast, plot_forecast, rdirichlet.orig,
+# flux.uncertainty, varnames/units character vectors, ParticleFilter
+source("../R/functions.R")
+
+# R/utils.R: ciEnvelope, col.alpha, wtd.quantile, solar_geom, mat2mcmc.list
+source("../R/utils.R")
+
+# ── Load SSEM ensemble output from Exercise 01 ────────────────────────────────
+# ensemble_forecast() returns a 3-D array [timestep × ensemble × variable].
+# We read it from disk so this document does not need to re-run the model.
+rds_path <- "../data/ssem_detha_2000.rds"
+if (file.exists(rds_path)) {
+  ssem_output <- readRDS(rds_path)
+  cat("SSEM output loaded:", paste(dim(ssem_output), collapse = " × "),
+      "[timesteps × ensemble × variables]\n")
+} else {
+  stop(paste(
+    "File not found:", rds_path, "\n\n",
+    "Please knit 01_run_model.Rmd first and then run:\n",
+    "  saveRDS(output, \"../data/ssem_detha_2000.rds\")\n",
+    "in the console, then re-knit this document."
+  ))
+}
+
+# ── Site timestep intervals ────────────────────────────────────────────────────
+# Each flux tower site uses a different sub-daily measurement frequency.
+# This list is the single source of truth used downstream in Chunk 3 to convert
+# instantaneous flux rates (μmol CO₂ m⁻² s⁻¹) to per-timestep totals
+# (gC m⁻² per step) and ultimately to daily totals (gC m⁻² day⁻¹).
+#
+# Getting the timestep wrong introduces a proportional error in every flux
+# integral. For US-MMS vs DE-Tha, using the same constant for both would halve
+# or double one site's daily totals — making two ecologically similar forests
+# appear very different for a purely methodological reason.
+#
+# DE-Tha / DK-Sor: "_HH_" half-hourly FLUXNET product — 30 min intervals,
+#   48 rows per day, 1800 seconds per timestep.
+# US-MMS: "_HR_" hourly AmeriFlux product — 60 min intervals, 24 rows per day,
+#   3600 seconds per timestep. The "_HR_" naming is an AmeriFlux convention that
+#   differs from the legacy FLUXNET "_HH_" convention; see the comment in
+#   Chunk 2 and data/US-MMS/extract_hr_workaround.R for the full explanation.
+site_timestep <- list(
+  "DE-Tha" = 30,   # minutes per timestep (half-hourly, _HH_ product)
+  "DK-Sor" = 30,   # minutes per timestep (half-hourly, _HH_ product)
+  "US-MMS" = 60    # minutes per timestep (hourly, _HR_ product)
+)
+```
+
+---
+
+## Load raw observations
+
+> The code below loads every data source exactly as it arrives — no unit
+> conversions yet. Read the column names and the raw values carefully. You are
+> about to encounter one of the most routine but under-discussed problems in
+> multi-source model evaluation: every system uses different units, different
+> sign conventions, and different time resolutions. Before you can compare
+> anything, you must understand what you have.
+
+```{r load_raw, message=FALSE}
+# ── Sub-daily FLUXNET data for all three sites ────────────────────────────────
+# We load the finest available time resolution for each site.  The variable
+# names differ between sites because DE-Tha and DK-Sor were processed through
+# the fluxnet R package while US-MMS was extracted by a standalone workaround.
+#
+# DE-Tha_HH.csv — half-hourly (30 min), timestamp column: DATETIME_START
+#   ISO 8601 format ("1996-01-01T00:00:00Z"); processed by fluxnet package.
+#   Site: Norway spruce plantation, Tharandt, Germany; coverage 1996–2024.
+#
+# DK-Sor_HH.csv — half-hourly (30 min), timestamp column: DATETIME_START
+#   Same format as DE-Tha; also processed by the fluxnet package.
+#   Site: European beech forest, Sorø, Denmark; coverage 1996–2024.
+#
+# US-MMS_HR.csv — hourly (60 min), timestamp column: TIMESTAMP_START
+#   Integer format YYYYMMDDHHMM (e.g., 199901010000 = midnight 1 Jan 1999).
+#   NOT produced by the fluxnet package because flux_extract() v0.3.1 silently
+#   skips files named "_HR_" (it searches for the legacy "_HH_" pattern from
+#   older FLUXNET products). The file was extracted by the standalone workaround
+#   at data/US-MMS/extract_hr_workaround.R — see that script for the full
+#   explanation of the bug and the GitHub issue tracking the fix.
+#   Site: mixed deciduous broadleaf forest, Morgan Monroe State Forest, Indiana;
+#   coverage 1999–2023.
+# col_select loads only the three columns that harmonise_subdaily() needs.
+# The HH/HR files are 695 MB / 683 MB / 284 MB on disk and expand to ~2 GB each
+# in memory when fully loaded; selecting only these columns reduces each to < 10 MB.
+detha_hh_raw <- read_csv("../data/DE-Tha/DE-Tha_HH.csv", show_col_types = FALSE,
+                          col_select = c(DATETIME_START, NEE_VUT_REF, NEE_VUT_REF_QC))
+dksor_hh_raw <- read_csv("../data/DK-Sor/DK-Sor_HH.csv", show_col_types = FALSE,
+                          col_select = c(DATETIME_START, NEE_VUT_REF, NEE_VUT_REF_QC))
+usmms_hr_raw <- read_csv("../data/US-MMS/US-MMS_HR.csv",  show_col_types = FALSE,
+                          col_select = c(TIMESTAMP_START, NEE_VUT_REF, NEE_VUT_REF_QC))
+
+# FLUXNET/AmeriFlux fill value: -9999 means missing (not zero). Replace with NA.
+# across(where(is.numeric)) catches every numeric column in one call.
+replace_fluxnet_na <- function(df) {
+  df |> mutate(across(where(is.numeric), \(x) replace(x, x == -9999, NA)))
+}
+detha_hh_raw <- replace_fluxnet_na(detha_hh_raw)
+dksor_hh_raw <- replace_fluxnet_na(dksor_hh_raw)
+usmms_hr_raw <- replace_fluxnet_na(usmms_hr_raw)
+
+# ── US-MMS daily (DD) for CMIP6 Chunk 6 compatibility ────────────────────────
+# Chunk 6 (CMIP6 comparison, monthly scale) accesses `usmms_raw` and expects a
+# DATE column and daily-resolution GPP/RECO columns — the format produced by
+# the fluxnet package's flux_read() at daily resolution.  We keep loading the
+# DD file here so Chunk 6 requires no modification, and name it `usmms_raw` to
+# preserve the variable name that Chunk 6 uses.
+usmms_raw <- read_csv("../data/US-MMS/US-MMS_DD.csv", show_col_types = FALSE)
+
+# ── CMIP6 monthly output (all three models) — unchanged ──────────────────────
+# Pre-extracted from the Pangeo CMIP6 catalog at the grid cell nearest to
+# US-MMS. One row per month; units for carbon fluxes: kg C m⁻² s⁻¹.
+cesm2_raw   <- read_csv("../data/cmip6/CESM2_usmms_monthly.csv",
+                        show_col_types = FALSE)
+ipsl_raw    <- read_csv("../data/cmip6/IPSL-CM6A-LR_usmms_monthly.csv",
+                        show_col_types = FALSE)
+ukesm_raw   <- read_csv("../data/cmip6/UKESM1-0-LL_usmms_monthly.csv",
+                        show_col_types = FALSE)
+
+# ── Discovery: print the unit and format situation ────────────────────────────
+cat("── Sub-daily FLUXNET: loaded file sizes ────────────────────────────────\n")
+cat(sprintf("  DE-Tha HH rows: %s (1996–2024, 30 min)\n",
+            format(nrow(detha_hh_raw), big.mark = ",")))
+cat(sprintf("  DK-Sor HH rows: %s (1996–2024, 30 min)\n",
+            format(nrow(dksor_hh_raw), big.mark = ",")))
+cat(sprintf("  US-MMS HR rows: %s (1999–2023, 60 min)\n",
+            format(nrow(usmms_hr_raw), big.mark = ",")))
+cat("\n── Sub-daily FLUXNET: carbon flux columns ──────────────────────────────\n")
+cat("  Variable          Raw units             Notes\n")
+cat("  NEE_VUT_REF       μmol CO₂ m⁻² s⁻¹    Instantaneous rate; + = source\n")
+cat("  NEE_VUT_REF_QC    0–3 integer          0=measured, 1–3=gap-fill tier\n")
+cat("  Timestamp column:\n")
+cat("    DE-Tha / DK-Sor:  DATETIME_START  (ISO 8601, e.g. 1996-01-01T00:00:00Z)\n")
+cat("    US-MMS:           TIMESTAMP_START (integer YYYYMMDDHHMM, e.g. 199901010000)\n")
+cat("  The timestamp difference is handled in Chunk 3 (harmonize).\n\n")
+cat("── CMIP6 monthly: key columns ──────────────────────────────────────────\n")
+cat("  gpp_kgC_m2_s     kg C m⁻² s⁻¹  (monthly average RATE — very different\n")
+cat("                                   from FLUXNET μmol units; see Chunk 3)\n\n")
+cat("── SSEM output (from Exercise 01) ──────────────────────────────────────\n")
+cat("  GPP [dim 3 = 5]  μmol CO₂ m⁻² s⁻¹  (30-min average rate)\n")
+cat("  NEP [dim 3 = 6]  μmol CO₂ m⁻² s⁻¹  (positive = ecosystem gaining C)\n")
+cat("  Negate NEP → NEE so sign convention matches FLUXNET (done in Chunk 3).\n")
+```
+
+---
+
+## Unit harmonization
+
+> **A note on embedded assumptions.** Every unit conversion below is also a
+> scientific decision. Multiplying a half-hourly rate by 1800 seconds assumes
+> the rate was constant over that 30-minute window — true for FLUXNET gap-filled
+> data by construction, but an approximation for the model. Choosing
+> `GPP_NT_VUT_REF` (nighttime-partitioning method) rather than
+> `GPP_DT_VUT_REF` (daytime method) can change the annual GPP estimate by
+> 5–15% at individual sites. Negating SSEM's NEP to produce an NEE-convention
+> value embeds the assumption that storage fluxes are negligible — reasonable
+> at the daily timescale, questionable at sub-hourly timescales. Read each
+> conversion below and make sure you understand both the arithmetic and the
+> assumption it encodes.
+
+```{r harmonize, message=FALSE}
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# CONVERSION CONSTANTS (centralised per CLAUDE.md — define once, use everywhere)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Molar mass of carbon in grams per micromole CO₂
+MC <- 12e-6   # gC μmol⁻¹
+
+# Seconds per minute
+SECS_PER_MIN <- 60L
+
+# Per-site conversion: μmol CO₂ m⁻² s⁻¹ (instantaneous rate) → gC m⁻² per step.
+# Formula: MC × timestep_length_in_minutes × SECS_PER_MIN
+# = MC × timestep_in_seconds
+#
+# SCIENTIFIC ASSUMPTION EMBEDDED HERE:
+#   This conversion assumes the flux rate is constant over the entire timestep.
+#   For FLUXNET gap-filled data this is true by construction: each 30-min or
+#   60-min value IS the mean over that window. For SSEM output it is also true
+#   by design (each timestep produces a single mean rate). The assumption
+#   becomes an approximation only when up-scaling from fine to coarse time steps.
+#
+# DE-Tha / DK-Sor (30-min): 12e-6 × 30 × 60 = 0.0216 gC per step
+# US-MMS         (60-min): 12e-6 × 60 × 60 = 0.0432 gC per step
+#
+# Using the same constant for both would halve or double one site's daily totals.
+# This would make two ecologically similar forests appear to have very different
+# carbon balances for a purely methodological reason — a common error in
+# multi-site model-data comparison papers.
+umol_s_to_gC_step <- function(site) {
+  MC * site_timestep[[site]] * SECS_PER_MIN
+}
+
+# Daily average rate → daily total (used for CMIP6 comparisons in Chunk 6)
+UMOL_S_TO_GC_DAY <- MC * 86400            # μmol m⁻² s⁻¹ → gC m⁻² day⁻¹ = 1.0368
+KGC_S_TO_GC_DAY  <- 1000 * 86400          # kg C m⁻² s⁻¹ → gC m⁻² day⁻¹ = 86400000
+MGC_HA_TO_KGC_M2 <- 1000 / 10000          # Mg C ha⁻¹ → kg C m⁻² = 0.1
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PART A — SSEM: produce both sub-daily and daily representations
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# SSEM was run for DE-Tha year 2000 at 30-minute resolution (see Exercise 01).
+# Year 2000 is a leap year: 366 days × 48 steps/day = 17,568 timesteps.
+# We build two representations:
+#   ssem_subdaily: one row per 30-min step (for sub-daily comparison in Chunk 4)
+#   ssem_daily:    one row per calendar day (for annual cycle and cost functions)
+
+n_steps        <- dim(ssem_output)[1]            # 17,568
+ssem_step_mins <- site_timestep[["DE-Tha"]]      # 30 minutes
+
+# Build a POSIXct datetime vector aligned to FLUXNET HH timestamps.
+# FLUXNET DATETIME_START represents the start of each 30-min window.
+# The first driver row loaded in Exercise 01 was 2000-01-01 00:00 UTC.
+ssem_datetime <- seq(
+  from       = as.POSIXct("2000-01-01 00:00:00", tz = "UTC"),
+  by         = paste(ssem_step_mins, "mins"),
+  length.out = n_steps
+)
+
+# Variable 6 in SSEM output is NEP (net ecosystem production, positive = C sink).
+# Negate to produce NEE (net ecosystem exchange, positive = atmospheric source)
+# so SSEM and FLUXNET use the same sign convention throughout this exercise.
+ssem_nee_raw <- -ssem_output[,, 6]   # [17568 × 100], μmol CO₂ m⁻² s⁻¹
+
+# Sub-daily summary: ensemble 2.5%, 50%, 97.5% at each 30-min step.
+ssem_sd_ci <- apply(ssem_nee_raw, 1, quantile, c(0.025, 0.5, 0.975), na.rm = TRUE)
+
+ssem_subdaily <- tibble(
+  datetime = ssem_datetime,
+  date     = as.Date(ssem_datetime),
+  site     = "DE-Tha",
+  nee_med  = ssem_sd_ci["50%",   ],   # μmol CO₂ m⁻² s⁻¹
+  nee_lo   = ssem_sd_ci["2.5%",  ],
+  nee_hi   = ssem_sd_ci["97.5%", ]
+)
+
+# Daily aggregation: sum per-step NEE contributions within each calendar day.
+# Rate (μmol m⁻² s⁻¹) × step conversion (gC/step) summed over 48 steps/day
+# gives daily total in gC m⁻² day⁻¹.
+step_conv <- umol_s_to_gC_step("DE-Tha")   # 0.0216 gC per 30-min step
+n_days    <- n_steps / 48
+day_idx   <- rep(seq_len(n_days), each = 48)
+ssem_dates <- seq.Date(as.Date("2000-01-01"), by = "day", length.out = n_days)
+
+daily_nee_ens <- apply(ssem_nee_raw, 2, function(ens) {
+  tapply(ens, day_idx, sum) * step_conv
+})   # [366 × 100]
+
+daily_gpp_ens <- apply(ssem_output[,, 5], 2, function(ens) {
+  tapply(ens, day_idx, sum) * step_conv
+})
+
+nee_ci <- apply(daily_nee_ens, 1, quantile, c(0.025, 0.5, 0.975), na.rm = TRUE)
+gpp_ci <- apply(daily_gpp_ens, 1, quantile, c(0.025, 0.5, 0.975), na.rm = TRUE)
+
+ssem_daily <- tibble(
+  date    = ssem_dates,
+  site    = "DE-Tha",
+  nee_med = nee_ci["50%",   ],   # gC m⁻² day⁻¹
+  nee_lo  = nee_ci["2.5%",  ],
+  nee_hi  = nee_ci["97.5%", ],
+  gpp_med = gpp_ci["50%",   ],
+  gpp_lo  = gpp_ci["2.5%",  ],
+  gpp_hi  = gpp_ci["97.5%", ]
+)
+
+cat("SSEM sub-daily rows:", nrow(ssem_subdaily),
+    "| SSEM daily rows:", nrow(ssem_daily),
+    "| Annual GPP median (gC m⁻² yr⁻¹):",
+    round(sum(ssem_daily$gpp_med), 0), "\n")
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PART B — FLUXNET: standardise sub-daily HH/HR data, then aggregate to daily
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Step 1: parse timestamps and select key columns.
+# The timestamp column differs between sites:
+#   DE-Tha / DK-Sor: DATETIME_START (ISO 8601 with trailing Z = UTC)
+#   US-MMS:          TIMESTAMP_START (integer YYYYMMDDHHMM, raw FLUXNET format)
+harmonise_subdaily <- function(df, site_label) {
+  if ("DATETIME_START" %in% names(df)) {
+    dt <- as.POSIXct(df$DATETIME_START, tz = "UTC")
+  } else {
+    # YYYYMMDDHHMM integer → POSIXct.
+    # as.character() handles integer64 (bit64) safely.
+    dt <- as.POSIXct(as.character(df$TIMESTAMP_START),
+                     format = "%Y%m%d%H%M", tz = "UTC")
+  }
+  tibble(
+    datetime = dt,
+    date     = as.Date(dt),
+    site     = site_label,
+    nee_raw  = df$NEE_VUT_REF,       # μmol CO₂ m⁻² s⁻¹, source-positive
+    nee_qc   = df$NEE_VUT_REF_QC     # 0 = measured, 1–3 = gap-fill tiers
+  )
+}
+
+detha_subdaily <- harmonise_subdaily(detha_hh_raw, "DE-Tha")
+dksor_subdaily <- harmonise_subdaily(dksor_hh_raw, "DK-Sor")
+usmms_subdaily <- harmonise_subdaily(usmms_hr_raw, "US-MMS")
+
+fluxnet_subdaily <- bind_rows(detha_subdaily, dksor_subdaily, usmms_subdaily)
+
+# Step 2: aggregate to daily totals using the correct per-site step length.
+# Only compute a daily total if at least 75% of expected timesteps are non-NA.
+# Fewer than 75% means the sum would be artificially low and could make one day
+# look like a weaker sink than it actually was.
+aggregate_to_daily <- function(df, site_label) {
+  n_expected <- 1440L / site_timestep[[site_label]]   # 48 or 24 steps per day
+  step_gC    <- umol_s_to_gC_step(site_label)
+
+  df |>
+    filter(site == site_label) |>
+    group_by(date, site) |>
+    summarise(
+      n_steps_ok  = sum(!is.na(nee_raw)),
+      nee_gCm2d   = if_else(
+        n_steps_ok >= 0.75 * n_expected,
+        sum(nee_raw * step_gC, na.rm = TRUE),   # daily total in gC m⁻² day⁻¹
+        NA_real_
+      ),
+      nee_qc_mean = mean(nee_qc, na.rm = TRUE),  # for cost-function filtering
+      .groups     = "drop"
+    )
+}
+
+fluxnet_daily <- bind_rows(
+  aggregate_to_daily(fluxnet_subdaily, "DE-Tha"),
+  aggregate_to_daily(fluxnet_subdaily, "DK-Sor"),
+  aggregate_to_daily(fluxnet_subdaily, "US-MMS")
+)
+
+# Step 3: identify the most recent complete year for each site.
+# "Complete" = at least 330 days in the year have a non-NA daily NEE total.
+# This is used in Chunk 4 to choose which annual cycle to display for each site.
+# DE-Tha: most recent year used for the sub-daily July panel is forced to 2000
+# by the SSEM run; for other sites we use their own most recent complete year.
+most_recent_complete_year <- function(site_label) {
+  fluxnet_daily |>
+    filter(site == site_label) |>
+    mutate(yr = year(date)) |>
+    group_by(yr) |>
+    summarise(n_ok = sum(!is.na(nee_gCm2d)), .groups = "drop") |>
+    filter(n_ok >= 330) |>
+    pull(yr) |>
+    max()
+}
+
+obs_year <- list(
+  "DE-Tha" = 2000L,                                      # fixed: SSEM run year
+  "DK-Sor" = most_recent_complete_year("DK-Sor"),
+  "US-MMS" = most_recent_complete_year("US-MMS")
+)
+
+cat("Observation year used for July sub-daily comparison and annual cycle:\n")
+for (s in names(obs_year)) cat(sprintf("  %s: %d\n", s, obs_year[[s]]))
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PART C — CMIP6: convert kg C m⁻² s⁻¹ → gC m⁻² day⁻¹ (unchanged)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+harmonise_cmip6 <- function(df, model_label) {
+  df |>
+    mutate(
+      model      = model_label,
+      gpp_gCm2d  = gpp_kgC_m2_s * KGC_S_TO_GC_DAY,
+      rh_gCm2d   = rh_kgC_m2_s  * KGC_S_TO_GC_DAY,
+      ra_gCm2d   = ra_kgC_m2_s  * KGC_S_TO_GC_DAY,
+      days_in_mo = days_in_month(as.Date(paste(year, month, "01", sep = "-")))
+    ) |>
+    select(model, year, month, days_in_mo, scenario,
+           gpp_gCm2d, rh_gCm2d, ra_gCm2d, lai_m2_m2)
+}
+
+cesm2     <- harmonise_cmip6(cesm2_raw,  "CESM2")
+ipsl      <- harmonise_cmip6(ipsl_raw,   "IPSL-CM6A-LR")
+ukesm     <- harmonise_cmip6(ukesm_raw,  "UKESM1-0-LL")
+cmip6_all <- bind_rows(cesm2, ipsl, ukesm)
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PART D — FLUXCOM placeholder (unchanged from original)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Representative annual GPP from Nelson et al. (2024) for the DE-Tha region.
+# Replace with values read from data/fluxcom/ when the file is available.
+fluxcom_gpp_annual <- 1080   # gC m⁻² yr⁻¹
+fluxcom_gpp_sd     <- 130    # ±1 SD from FLUXCOM ensemble
+
+cat("\nHarmonization complete.\n")
+cat(sprintf("  FLUXNET sub-daily rows: %s\n", format(nrow(fluxnet_subdaily), big.mark=",")))
+cat(sprintf("  FLUXNET daily rows:     %s\n", format(nrow(fluxnet_daily),    big.mark=",")))
+cat(sprintf("  CMIP6 monthly rows:     %d\n", nrow(cmip6_all)))
+```
+
+---
+
+## Visual comparison
+
+```{r compare_subdaily, fig.width=11, fig.height=8}
+#| fig.cap: >
+#|   Sub-daily NEE during July at each site. Blue ribbon: SSEM 95% credible
+#|   interval (DE-Tha only). Blue line: SSEM ensemble median. Grey points:
+#|   FLUXNET NEE_VUT_REF at native sub-daily resolution. SSEM was run only at
+#|   DE-Tha for year 2000; DK-Sor and US-MMS show observations from their most
+#|   recent complete year (see strip labels). Units: μmol CO₂ m⁻² s⁻¹; positive
+#|   = atmospheric source. Note that the US-MMS panel has half as many points
+#|   per day (hourly vs half-hourly) as the European sites.
+
+# ── Panel 1: sub-daily NEE for July ──────────────────────────────────────────
+# July is the peak-growing-season month at all three sites, making the diurnal
+# cycle most pronounced and differences in GPP magnitude most visible.
+# Negative values (mid-day sink) dominate during daytime; respiration drives
+# positive values at night. SSEM's light-use-efficiency model captures the
+# daytime dip but cannot represent water-stress-driven afternoon depression
+# in GPP — watch for that gap between SSEM and observations on hot days.
+
+# SSEM: extract July 2000 sub-daily steps
+ssem_july <- ssem_subdaily |>
+  filter(month(datetime) == 7L)   # month() returns integer; year is already 2000
+
+# FLUXNET: each site uses its own obs_year, filtered to July
+fluxnet_july <- fluxnet_subdaily |>
+  mutate(yr = year(datetime)) |>
+  filter(
+    (site == "DE-Tha" & yr == obs_year[["DE-Tha"]]) |
+    (site == "DK-Sor" & yr == obs_year[["DK-Sor"]]) |
+    (site == "US-MMS" & yr == obs_year[["US-MMS"]])
+  ) |>
+  filter(month(datetime) == 7L)
+
+# Facet strip labels: embed the year and vegetation type so students know
+# which year each panel represents without reading the caption.
+july_labels <- c(
+  "DE-Tha" = sprintf("DE-Tha — Norway spruce (DE) — July %d + SSEM",
+                     obs_year[["DE-Tha"]]),
+  "DK-Sor" = sprintf("DK-Sor — European beech (DK) — July %d",
+                     obs_year[["DK-Sor"]]),
+  "US-MMS" = sprintf("US-MMS — mixed deciduous (IN) — July %d  [hourly]",
+                     obs_year[["US-MMS"]])
+)
+
+ggplot(mapping = aes(x = datetime)) +
+  # SSEM 95% credible interval — steelblue ribbon (DE-Tha only)
+  geom_ribbon(
+    data = ssem_july,
+    aes(ymin = nee_lo, ymax = nee_hi),
+    fill = "steelblue", alpha = 0.30
+  ) +
+  # SSEM ensemble median line
+  geom_line(
+    data = ssem_july,
+    aes(y = nee_med),
+    colour = "steelblue3", linewidth = 0.5
+  ) +
+  # FLUXNET observed sub-daily NEE (all sites)
+  geom_point(
+    data    = fluxnet_july,
+    mapping = aes(y = nee_raw),
+    colour  = "grey20", alpha = 0.30, size = 0.3
+  ) +
+  # Zero reference: above = source, below = sink
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50",
+             linewidth = 0.35) +
+  facet_wrap(
+    ~ factor(site, levels = names(july_labels), labels = july_labels),
+    ncol = 1, scales = "free_x"
+  ) +
+  labs(
+    title    = "Sub-daily NEE — July comparison across three temperate forest sites",
+    subtitle = paste("Units: μmol CO₂ m⁻² s⁻¹  |  + = source  |",
+                     "SSEM shown for DE-Tha 2000 only"),
+    x        = NULL,
+    y        = expression(NEE ~ (μmol ~ CO[2] ~ m^{-2} ~ s^{-1}))
+  ) +
+  theme_classic(base_size = 12) +
+  theme(strip.background = element_blank(),
+        strip.text        = element_text(face = "bold", size = 9),
+        panel.spacing     = unit(1.2, "lines"))
+```
+
+```{r compare_daily_annual, fig.width=11, fig.height=8}
+#| fig.cap: >
+#|   Annual cycle of daily NEE for each site. Blue ribbon: SSEM 95% credible
+#|   interval (DE-Tha 2000 only). Blue line: SSEM ensemble median. Grey points:
+#|   FLUXNET daily NEE_VUT_REF aggregated from sub-daily data. Each site shows
+#|   its most recent complete year (see strip labels). x-axis is day of year so
+#|   all sites share the same seasonal scale regardless of calendar year.
+#|   Units: gC m⁻² day⁻¹; positive = source.
+
+# ── Panel 2: full annual cycle at daily aggregated scale ──────────────────────
+# The sub-daily July panel shows the fine-scale dynamics; this panel puts them
+# in annual context. Students should notice: (a) how much of the annual carbon
+# budget is concentrated in the summer months, (b) whether SSEM's spring
+# transition timing matches the observations at DE-Tha, and (c) the contrast
+# between evergreen (DE-Tha, flatter seasonal cycle) and deciduous
+# (DK-Sor, US-MMS, sharper spring green-up) vegetation types.
+
+# Filter each site to its designated observation year
+annual_fluxnet <- fluxnet_daily |>
+  mutate(yr = year(date)) |>
+  filter(
+    (site == "DE-Tha" & yr == obs_year[["DE-Tha"]]) |
+    (site == "DK-Sor" & yr == obs_year[["DK-Sor"]]) |
+    (site == "US-MMS" & yr == obs_year[["US-MMS"]])
+  ) |>
+  mutate(doy = yday(date))
+
+# Add day-of-year to SSEM for the shared x-axis
+ssem_doy <- ssem_daily |>
+  mutate(doy = yday(date))
+
+# Strip labels with year context
+annual_labels <- c(
+  "DE-Tha" = sprintf("DE-Tha — Norway spruce (DE) — %d", obs_year[["DE-Tha"]]),
+  "DK-Sor" = sprintf("DK-Sor — European beech (DK) — %d", obs_year[["DK-Sor"]]),
+  "US-MMS" = sprintf("US-MMS — mixed deciduous (IN) — %d", obs_year[["US-MMS"]])
+)
+
+ggplot(mapping = aes(x = doy)) +
+  # SSEM uncertainty ribbon and median (DE-Tha only)
+  geom_ribbon(
+    data = ssem_doy,
+    aes(ymin = nee_lo, ymax = nee_hi),
+    fill = "steelblue", alpha = 0.30
+  ) +
+  geom_line(
+    data = ssem_doy,
+    aes(y = nee_med),
+    colour = "steelblue3", linewidth = 0.5
+  ) +
+  # FLUXNET daily NEE
+  geom_point(
+    data    = annual_fluxnet,
+    mapping = aes(y = nee_gCm2d),
+    colour  = "grey20", alpha = 0.40, size = 0.6
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50",
+             linewidth = 0.35) +
+  facet_wrap(
+    ~ factor(site, levels = names(annual_labels), labels = annual_labels),
+    ncol = 1, scales = "free_y"
+  ) +
+  scale_x_continuous(
+    breaks = c(1, 60, 121, 182, 244, 305, 366),
+    labels = c("Jan", "Mar", "May", "Jul", "Sep", "Nov", "Dec")
+  ) +
+  labs(
+    title    = "Annual cycle of daily NEE — most recent complete year per site",
+    subtitle = paste("Units: gC m⁻² day⁻¹  |  + = source  |",
+                     "SSEM shown for DE-Tha 2000 only"),
+    x        = "Day of year",
+    y        = expression(NEE ~ (gC ~ m^{-2} ~ day^{-1}))
+  ) +
+  theme_classic(base_size = 12) +
+  theme(strip.background = element_blank(),
+        strip.text        = element_text(face = "bold", size = 9),
+        panel.spacing     = unit(1.2, "lines"))
+```
+
+---
+
+## Cost functions
+
+```{r cost_functions}
+# ── Cost function metrics at sub-daily and daily scales ───────────────────────
+# Three metrics capture different aspects of model performance:
+#
+#   RMSE  — root mean square error: the typical magnitude of a single error.
+#           Penalises large errors quadratically, so it is dominated by the
+#           worst predictions. Units match the variable (μmol m⁻² s⁻¹ at
+#           sub-daily scale; gC m⁻² day⁻¹ at daily scale — not comparable
+#           in magnitude, but dimensionless r is directly comparable).
+#
+#   Bias  — mean(model − observation): a non-zero bias indicates a systematic
+#           offset that RMSE cannot distinguish from random scatter. Positive
+#           bias means the model predicts a larger source (or smaller sink)
+#           on average. Often caused by a mismatch in either GPP or Reco.
+#
+#   r     — Pearson correlation coefficient: whether the model tracks the
+#           temporal pattern of observations, independent of absolute level.
+#           A model can achieve r = 0.9 while having a large RMSE if the
+#           seasonal shape is right but the amplitude is wrong.
+#
+# TIMESCALE DEPENDENCY — a modeling choice:
+#   Cost function values change with the timescale at which they are computed.
+#   Daily metrics smooth over the diurnal cycle, reducing sensitivity to the
+#   representation of photosynthesis onset, stomatal responses, and nighttime
+#   respiration. Sub-daily metrics expose these processes directly.
+#   Neither timescale is universally "correct" — the right choice depends on
+#   the management or policy question the model is meant to answer:
+#     • Sub-daily: relevant if the model is used for flux partitioning,
+#       phenology detection, or land–atmosphere coupling in an ESM.
+#     • Daily: relevant if the model is used for seasonal carbon budgets,
+#       forest management planning, or carbon credit accounting.
+#   Reporting metrics at both scales is good practice because it prevents a
+#   model from appearing skillful at one scale while hiding failures at another.
+
+# ── Helper: compute RMSE, bias, and Pearson r ─────────────────────────────────
+compute_metrics <- function(model_vec, obs_vec) {
+  valid <- !is.na(model_vec) & !is.na(obs_vec)
+  n     <- sum(valid)
+  if (n < 2L) return(list(n = 0L, rmse = NA_real_, bias = NA_real_, r = NA_real_))
+  res <- model_vec[valid] - obs_vec[valid]
+  list(
+    n    = n,
+    rmse = sqrt(mean(res^2)),
+    bias = mean(res),
+    r    = cor(model_vec[valid], obs_vec[valid])
+  )
+}
+
+# ── Sub-daily metrics (μmol CO₂ m⁻² s⁻¹) ────────────────────────────────────
+# Join SSEM sub-daily timesteps with FLUXNET HH observations for DE-Tha 2000.
+# Filter to well-measured timesteps: QC flag 0 (measured) or 1 (good gap-fill).
+# QC 2 and 3 indicate coarser gap-filling where the "observation" is largely
+# model-derived — including those would inflate r artificially.
+detha_sd_eval <- detha_subdaily |>
+  filter(year(datetime) == 2000L, nee_qc <= 1L) |>
+  inner_join(
+    ssem_subdaily |> select(datetime, nee_med),
+    by = "datetime"
+  )
+
+sd_de  <- compute_metrics(detha_sd_eval$nee_med, detha_sd_eval$nee_raw)
+
+# DK-Sor and US-MMS: SSEM was not run at these sites, so no model values exist.
+# We include NA rows in the table to make this explicit rather than omitting
+# those sites — the absence of SSEM output is itself a result that tells
+# students the model has not been evaluated there.
+sd_dk  <- list(n = NA_integer_, rmse = NA_real_, bias = NA_real_, r = NA_real_)
+sd_us  <- list(n = NA_integer_, rmse = NA_real_, bias = NA_real_, r = NA_real_)
+
+# ── Daily metrics (gC m⁻² day⁻¹) ─────────────────────────────────────────────
+# Filter to days where the mean HH QC flag <= 1 (most timesteps were measured).
+# This is stricter than filtering at QC >= 0.5 (the CLAUDE.md standard for
+# daily data), and reflects that we are now aggregating from sub-daily QC flags.
+detha_dd_eval <- fluxnet_daily |>
+  filter(site == "DE-Tha", year(date) == 2000L,
+         !is.na(nee_gCm2d), nee_qc_mean <= 1.0) |>
+  inner_join(ssem_daily |> select(date, nee_med), by = "date")
+
+dd_de  <- compute_metrics(detha_dd_eval$nee_med, detha_dd_eval$nee_gCm2d)
+dd_dk  <- list(n = NA_integer_, rmse = NA_real_, bias = NA_real_, r = NA_real_)
+dd_us  <- list(n = NA_integer_, rmse = NA_real_, bias = NA_real_, r = NA_real_)
+
+# ── Summary table ─────────────────────────────────────────────────────────────
+metrics_tbl <- tibble(
+  Site        = rep(c("DE-Tha", "DK-Sor", "US-MMS"), each = 2L),
+  Timescale   = rep(c("Sub-daily", "Daily"), times = 3L),
+  Units       = rep(c("μmol m⁻² s⁻¹", "gC m⁻² day⁻¹"), times = 3L),
+  N           = c(sd_de$n,  dd_de$n,  sd_dk$n,  dd_dk$n,  sd_us$n,  dd_us$n),
+  RMSE        = c(sd_de$rmse, dd_de$rmse, sd_dk$rmse, dd_dk$rmse,
+                  sd_us$rmse, dd_us$rmse),
+  Bias        = c(sd_de$bias, dd_de$bias, sd_dk$bias, dd_dk$bias,
+                  sd_us$bias, dd_us$bias),
+  Correlation = c(sd_de$r,  dd_de$r,  sd_dk$r,  dd_dk$r,  sd_us$r,  dd_us$r)
+)
+
+cat("── Cost function metrics: SSEM ensemble median vs FLUXNET NEE ──────────\n")
+cat("   SSEM was run at DE-Tha year 2000 only.\n")
+cat("   NA = no SSEM output available for this site × timescale combination.\n")
+cat("   Sub-daily units: μmol CO₂ m⁻² s⁻¹\n")
+cat("   Daily units:     gC m⁻² day⁻¹  (not directly comparable in magnitude)\n\n")
+
+metrics_tbl |>
+  mutate(across(c(RMSE, Bias, Correlation), \(x) round(x, 3))) |>
+  print(n = Inf)
+
+cat("\nParticle filter connection (afternoon session):\n")
+cat("  Under a Gaussian error model with constant observation uncertainty σ,\n")
+cat("  maximising log-likelihood is equivalent to minimising the sum of\n")
+cat("  squared residuals — the quantity RMSE² × N summarises. The particle\n")
+cat("  filter goes further: it weights each ensemble member by its full\n")
+cat("  time-series likelihood, folds in the prior (parameter distributions),\n")
+cat("  and propagates the posterior forward. The timescale at which you\n")
+cat("  evaluate the likelihood is therefore part of the PF design.\n")
+
+# ── Seasonal residual plot at daily scale ─────────────────────────────────────
+# Plotting residuals by day of year reveals whether errors are systematic
+# across seasons or concentrated in a particular period. A smooth LOESS trend
+# that departs from zero in summer suggests a missing warm-season process
+# (water stress, VPD limitation, phenology); a winter departure implicates
+# the temperature-respiration relationship.
+detha_dd_eval |>
+  mutate(residual = nee_med - nee_gCm2d,
+         doy      = yday(date)) |>
+  ggplot(aes(x = doy, y = residual)) +
+    geom_point(alpha = 0.40, size = 0.8, colour = "tomato3") +
+    geom_smooth(method = "loess", span = 0.3, se = FALSE,
+                colour = "black", linewidth = 0.8) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    labs(
+      title    = "Seasonal residuals: SSEM − FLUXNET daily NEE at DE-Tha 2000",
+      subtitle = "Positive: model predicts larger source than observed | QC mean ≤ 1 days only",
+      x        = "Day of year",
+      y        = expression(Residual ~ (gC ~ m^{-2} ~ day^{-1}))
+    ) +
+    theme_classic(base_size = 12)
+```
+
+---
+
+## CMIP6 comparison
+
+> **Choose your model.** Set `chosen_model` to one of:
+> `"CESM2"`, `"IPSL-CM6A-LR"`, `"UKESM1-0-LL"`
+>
+> Each represents a different Earth system model from the CMIP6 multi-model
+> ensemble. CESM2 is NCAR's community model; IPSL-CM6A-LR is the Institut
+> Pierre-Simon Laplace model; UKESM1-0-LL is the UK Earth System Model.
+> All three are calibrated against global carbon budgets and observations,
+> not against individual flux tower records.
+
+```{r cmip6_compare, fig.width=10, fig.height=6}
+#| fig.cap: >
+#|   Monthly GPP and heterotrophic respiration (Rh) from the selected CMIP6
+#|   model (coloured lines) versus FLUXNET monthly means at US-MMS (black
+#|   points). FLUXNET RECO (total ecosystem respiration = Ra + Rh) is shown
+#|   rather than Rh alone because FLUXNET does not partition autotrophic and
+#|   heterotrophic respiration separately; expect RECO > CMIP6 Rh. Both axes
+#|   show gC m⁻² day⁻¹ (monthly average rate), covering 1999–2014.
+
+# ── USER SELECTION: change this line to choose a different model ──────────────
+chosen_model <- "CESM2"   # options: "CESM2", "IPSL-CM6A-LR", "UKESM1-0-LL"
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Validate the choice so students get a clear error message if they mistype
+stopifnot(
+  "`chosen_model` must be 'CESM2', 'IPSL-CM6A-LR', or 'UKESM1-0-LL'" =
+    chosen_model %in% c("CESM2", "IPSL-CM6A-LR", "UKESM1-0-LL")
+)
+cat("Comparing against:", chosen_model, "\n")
+
+# Extract the chosen model and add a proper date column (first day of each month)
+cmip6_chosen <- cmip6_all |>
+  filter(model == chosen_model) |>
+  mutate(date = as.Date(paste(year, month, "01", sep = "-")))
+
+# ── Aggregate FLUXNET US-MMS to monthly means (gC m⁻² day⁻¹) ─────────────────
+# FLUXNET US-MMS data starts 1999 and the CMIP6 historical run covers 1980–2014.
+# We use the full overlap: 1999–2014.
+# Taking the monthly MEAN of daily gC m⁻² day⁻¹ values gives a rate on the
+# same time axis as CMIP6 (which also reports monthly average daily rates).
+usmms_monthly <- usmms_raw |>
+  mutate(date = as.Date(DATE)) |>
+  filter(year(date) >= 1999, year(date) <= 2014) |>
+  mutate(across(where(is.numeric), \(x) replace(x, x == -9999, NA))) |>
+  mutate(
+    gpp_gCm2d  = GPP_NT_VUT_REF  * UMOL_S_TO_GC_DAY,
+    reco_gCm2d = RECO_NT_VUT_REF * UMOL_S_TO_GC_DAY
+  ) |>
+  group_by(year = year(date), month = month(date)) |>
+  summarise(
+    gpp_gCm2d  = mean(gpp_gCm2d,  na.rm = TRUE),
+    reco_gCm2d = mean(reco_gCm2d, na.rm = TRUE),
+    .groups    = "drop"
+  ) |>
+  mutate(date = as.Date(paste(year, month, "01", sep = "-")))
+
+# ── Plot monthly GPP: CMIP6 vs FLUXNET ───────────────────────────────────────
+# Pivot both sources to long format so ggplot can colour them separately.
+cmip6_long <- cmip6_chosen |>
+  select(date, GPP = gpp_gCm2d, Rh = rh_gCm2d) |>
+  pivot_longer(c(GPP, Rh), names_to = "variable", values_to = "value") |>
+  mutate(source = chosen_model)
+
+flux_long <- usmms_monthly |>
+  # Rename RECO to "Rh" for the plot panel — but annotate the mismatch
+  select(date, GPP = gpp_gCm2d, Rh = reco_gCm2d) |>
+  pivot_longer(c(GPP, Rh), names_to = "variable", values_to = "value") |>
+  mutate(source = "FLUXNET US-MMS")
+
+bind_rows(cmip6_long, flux_long) |>
+  ggplot(aes(x = date, y = value, colour = source)) +
+    geom_line(linewidth = 0.4, alpha = 0.7) +
+    # Annual mean smoothed to show interannual trend
+    geom_smooth(method = "loess", span = 0.15, se = FALSE,
+                linewidth = 1.0, na.rm = TRUE) +
+    facet_wrap(~ variable, ncol = 1, scales = "free_y",
+               labeller = as_labeller(c(
+                 GPP = "GPP (gC m⁻² day⁻¹)",
+                 Rh  = "Rh / RECO (gC m⁻² day⁻¹) — see note on scale mismatch"
+               ))) +
+    scale_colour_manual(
+      values = c("FLUXNET US-MMS" = "grey20",
+                 "CESM2"          = "#E07B39",
+                 "IPSL-CM6A-LR"   = "#5B8DB8",
+                 "UKESM1-0-LL"    = "#6BAE75")[c("FLUXNET US-MMS", chosen_model)]
+    ) +
+    scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+    labs(
+      title    = paste("Monthly GPP and Rh —", chosen_model, "vs FLUXNET US-MMS"),
+      subtitle = "1999–2014 | gC m⁻² day⁻¹ | Thick lines: LOESS trend",
+      x        = NULL,
+      y        = NULL,
+      colour   = NULL
+    ) +
+    theme_classic(base_size = 12) +
+    theme(
+      legend.position  = "bottom",
+      strip.background = element_blank(),
+      strip.text       = element_text(face = "bold")
+    )
+```
+
+> **Scale mismatch note.** Each CMIP6 grid cell represents roughly 1° × 1° of
+> latitude and longitude — approximately 100 km × 70 km at the latitude of
+> US-MMS. That single number blends forest, cropland, urban surface, and open
+> water, weighted by their fractional coverage in the land surface model.
+> The flux tower footprint covers a few hundred metres to perhaps 1–2 km at
+> most. The CMIP6 model was calibrated to reproduce global carbon budgets and
+> continental-scale patterns, not to match individual tower records. Expecting
+> it to agree with a tower to within 10% would be asking the wrong question.
+> A better use of ESM output is to ask: does the model reproduce the *direction*
+> of the seasonal cycle? Does its interannual variability correlate with
+> observations? Does its decadal trend match the atmospheric record? FLUXCOM
+> upscaled products, which blend tower observations with remote sensing and
+> meteorology to produce gridded estimates at 0.5° resolution, are a better
+> mediator for site-to-ESM comparisons because they operate at an intermediate
+> spatial scale.
+>
+> **Further exploration.** Additional data for these sites are in:
+>
+> - `data/DK-Sor/` — DK-Sor daily, monthly, and yearly FLUXNET products
+> - `data/US-MMS/` — US-MMS daily, monthly, and yearly products (no HH file)
+>
+> Try changing `chosen_model` above and re-knitting to compare models against
+> each other. Try computing the same cost function metrics (Chunk 5) for the
+> CMIP6 vs FLUXNET comparison and compare the numbers to SSEM.
+
+---
+
+## Discussion questions
+
+Work through all four questions before you leave the session. These do not have
+unique correct answers. The goal is to reason from the evidence in your plots
+and tables.
+
+**1. Which site does SSEM perform best on, and why?**
+Look at the visual comparison and the cost function table. Does SSEM reproduce
+the seasonal timing and magnitude of NEE at DE-Tha better or worse than you
+expected, given that the parameters were chosen for that site? If you re-ran
+SSEM with the same parameters at DK-Sor (a beech forest with strong spring
+green-up) what specific failure mode would you predict, and which parameter
+is most directly responsible?
+
+**2. What does the seasonal pattern of residuals tell you about what is
+missing?**
+Look at the residual plot in Chunk 5. Are the errors random throughout the
+year, or do they have a systematic seasonal structure? If they are larger in
+summer than in winter, or positive in spring and negative in autumn, what
+process does that implicate? Consider the list of things SSEM ignores — water
+stress, VPD limitation, phenology — and identify which omission is most
+consistent with the pattern you observe.
+
+**3. Would you trust a forecast from this model?**
+Imagine a stakeholder (a forest manager, a carbon credit verification service,
+a national carbon inventory) asked you to use SSEM to project annual NEE five
+years into the future for DE-Tha under a warming scenario. Based on the
+validation you have done, what would you tell them? Be specific: what does the
+model get right that you could defend, what does it get wrong that you could not
+defend, and what additional validation steps would you require before presenting
+the forecast as credible?
+
+**4. What would you need to change about SSEM to improve performance at a
+deciduous broadleaf forest (DBF) site?**
+US-MMS and DK-Sor are both deciduous — they have near-zero GPP in winter and
+a rapid spring onset driven by photoperiod and temperature. SSEM has no
+phenology module: Bleaf is driven entirely by the balance between NPPleaf
+allocation and the constant litterfall rate, which produces a very slow,
+temperature-driven seasonal cycle rather than a discrete green-up event. Sketch
+(in words, not code) what equations you would need to add to SSEM to reproduce
+a realistic deciduous phenology. What driver variables would those equations
+require, and are those drivers available in the current data files?
