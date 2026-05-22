@@ -7,13 +7,14 @@
 # Run from the repository root:
 #   Rscript exercises/generate_review_figures.R
 #
-# PNGs generated (16 total):
+# PNGs generated (18 total):
 #   01_DE-Tha_drivers.png / 01_DE-Tha_forecast_12panel.png
 #   01_DK-Sor_drivers.png / 01_DK-Sor_forecast_12panel.png
 #   01_US-MMS_drivers.png / 01_US-MMS_forecast_12panel.png
 #   02_DE-Tha_subdaily_july_nee.png / 02_DE-Tha_annual_daily_cycle.png
 #   02_DK-Sor_subdaily_july_nee.png / 02_DK-Sor_annual_daily_cycle.png
 #   02_US-MMS_subdaily_july_nee.png / 02_US-MMS_annual_daily_cycle.png
+#   02_allsites_subdaily_july_nee.png / 02_allsites_annual_daily_cycle.png
 #   02_allsites_cost_functions_table.png
 #   02_cmip6_CESM2_gpp_rh.png
 #   02_cmip6_IPSL-CM6A-LR_gpp_rh.png
@@ -329,14 +330,21 @@ for (site_label in names(site_configs)) {
 
   daily_nee_ens <- apply(ssem_nee_mat,  2, \(e) tapply(e, day_idx, sum) * step_conv)
   daily_gpp_ens <- apply(output[,, 5], 2, \(e) tapply(e, day_idx, sum) * step_conv)
+  # Ra = autotrophic (plant) respiration [col 7]; Rh = heterotrophic (soil) respiration [col 10]
+  daily_ra_ens  <- apply(output[,, 7], 2, \(e) tapply(e, day_idx, sum) * step_conv)
+  daily_rh_ens  <- apply(output[,, 10], 2, \(e) tapply(e, day_idx, sum) * step_conv)
 
   nee_ci <- apply(daily_nee_ens, 1, quantile, c(0.025, 0.5, 0.975), na.rm = TRUE)
   gpp_ci <- apply(daily_gpp_ens, 1, quantile, c(0.025, 0.5, 0.975), na.rm = TRUE)
+  ra_ci  <- apply(daily_ra_ens,  1, quantile, c(0.025, 0.5, 0.975), na.rm = TRUE)
+  rh_ci  <- apply(daily_rh_ens,  1, quantile, c(0.025, 0.5, 0.975), na.rm = TRUE)
 
   ssem_daily_list[[site_label]] <- tibble(
     date    = ssem_dates, site = site_label,
     nee_med = nee_ci["50%",   ], nee_lo = nee_ci["2.5%",  ], nee_hi = nee_ci["97.5%", ],
-    gpp_med = gpp_ci["50%",   ], gpp_lo = gpp_ci["2.5%",  ], gpp_hi = gpp_ci["97.5%", ]
+    gpp_med = gpp_ci["50%",   ], gpp_lo = gpp_ci["2.5%",  ], gpp_hi = gpp_ci["97.5%", ],
+    ra_med  = ra_ci["50%",    ],
+    rh_med  = rh_ci["50%",    ]
   )
 
   # ── Build fluxnet_subdaily and fluxnet_daily for this site ──────────────────
@@ -369,7 +377,9 @@ for (site_label in names(site_configs)) {
                   sum(ssem_daily_list[[site_label]]$gpp_med, na.rm = TRUE)))
 
   # Discard large objects before next iteration.
-  rm(raw, output, ssem_nee_mat, sd_ci, daily_nee_ens, daily_gpp_ens, nee_ci, gpp_ci)
+  rm(raw, output, ssem_nee_mat, sd_ci,
+     daily_nee_ens, daily_gpp_ens, daily_ra_ens, daily_rh_ens,
+     nee_ci, gpp_ci, ra_ci, rh_ci)
   invisible(gc(verbose = FALSE))
 }
 
@@ -463,6 +473,167 @@ for (site_label in names(site_configs)) {
          width = IN_W, height = IN_H, dpi = DPI, units = "in")
   report_saved(file.path(out_dir, fname))
 }
+
+
+# =============================================================================
+# PHASE 2b — all-sites combined subdaily July NEE
+# =============================================================================
+message("\n=== Figure: 02_allsites_subdaily_july_nee.png ===")
+
+# Bind all three sites into a single tibble for the faceted figure.
+ssem_sd_all <- bind_rows(ssem_subdaily_list)
+flux_sd_all <- bind_rows(fluxnet_subdaily_list)
+
+# Diagnostic: row counts before July filter so we can confirm all sites are present.
+message("Row counts before July filter:")
+for (s in names(site_configs)) {
+  message(sprintf("  SSEM  %-8s: %5d rows | FLUXNET %-8s: %5d rows",
+                  s, sum(ssem_sd_all$site == s),
+                  s, sum(flux_sd_all$site == s)))
+}
+
+# Filter to July. Each site uses its own run_year so x-axis spans differ by site;
+# facet scales = "free_x" handles this correctly.
+ssem_july_all <- ssem_sd_all |> filter(month(datetime) == 7L)
+flux_july_all <- flux_sd_all |> filter(month(datetime) == 7L)
+
+message("Row counts after July filter:")
+for (s in names(site_configs)) {
+  message(sprintf("  SSEM  %-8s: %5d rows | FLUXNET %-8s: %5d rows",
+                  s, sum(ssem_july_all$site == s),
+                  s, sum(flux_july_all$site == s)))
+}
+
+# Strip labels: embed site, vegetation type, run year, and timestep resolution
+# so the panel is self-documenting without needing to read the caption.
+july_labels_all <- setNames(
+  sapply(names(site_configs), function(s) {
+    cfg <- site_configs[[s]]
+    sprintf("%s — %s — July %d  [%d-min]", s, cfg$veg_label, cfg$run_year, cfg$step_mins)
+  }),
+  names(site_configs)
+)
+
+p_july_all <- ggplot(mapping = aes(x = datetime)) +
+  geom_ribbon(
+    data = ssem_july_all,
+    aes(ymin = nee_lo, ymax = nee_hi),
+    fill = "steelblue", alpha = 0.30
+  ) +
+  geom_line(
+    data = ssem_july_all,
+    aes(y = nee_med),
+    colour = "steelblue3", linewidth = 0.5
+  ) +
+  geom_point(
+    data = flux_july_all,
+    aes(y = nee_raw),
+    colour = "grey20", alpha = 0.30, size = 0.4
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50",
+             linewidth = 0.35) +
+  facet_wrap(
+    ~ factor(site, levels = names(july_labels_all), labels = july_labels_all),
+    ncol = 1, scales = "free_x"
+  ) +
+  labs(
+    title    = "Sub-daily NEE — July — all three sites",
+    subtitle = "Blue ribbon: SSEM 95% CI  |  Blue line: SSEM median  |  Grey: FLUXNET NEE_VUT_REF",
+    x        = NULL,
+    y        = expression(NEE ~ (mu * mol ~ CO[2] ~ m^{-2} ~ s^{-1}))
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    strip.background = element_blank(),
+    strip.text       = element_text(face = "bold", size = 9),
+    panel.spacing    = unit(1.2, "lines")
+  )
+
+ggsave(file.path(out_dir, "02_allsites_subdaily_july_nee.png"), plot = p_july_all,
+       width = IN_W, height = IN_H * 2.0, dpi = DPI, units = "in")
+report_saved(file.path(out_dir, "02_allsites_subdaily_july_nee.png"))
+
+
+# =============================================================================
+# PHASE 2c — all-sites combined annual daily NEE cycle
+# =============================================================================
+message("\n=== Figure: 02_allsites_annual_daily_cycle.png ===")
+
+ssem_dd_all <- bind_rows(ssem_daily_list)
+flux_dd_all <- bind_rows(fluxnet_daily_list)
+
+# Diagnostic: row counts and valid-NEE counts before DOY conversion.
+message("Row counts (daily data, run year only):")
+for (s in names(site_configs)) {
+  n_ssem <- sum(ssem_dd_all$site == s)
+  n_flux <- sum(flux_dd_all$site == s)
+  n_ok   <- sum(flux_dd_all$site == s & !is.na(flux_dd_all$nee_gCm2d))
+  message(sprintf("  SSEM  %-8s: %3d days | FLUXNET %-8s: %3d days (%d with valid NEE)",
+                  s, n_ssem, s, n_flux, n_ok))
+}
+
+# Add day-of-year column. All sites share a common DOY x-axis so seasonal
+# timing can be compared visually across vegetation types and climates.
+ssem_doy_all <- ssem_dd_all |> mutate(doy = yday(date))
+flux_doy_all <- flux_dd_all |>
+  filter(!is.na(nee_gCm2d)) |>   # drop days below 75%-coverage threshold
+  mutate(doy = yday(date))
+
+message("After NA filter — valid FLUXNET days per site:")
+for (s in names(site_configs)) {
+  message(sprintf("  %-8s: %3d days", s, sum(flux_doy_all$site == s)))
+}
+
+annual_labels_all <- setNames(
+  sapply(names(site_configs), function(s) {
+    cfg <- site_configs[[s]]
+    sprintf("%s — %s — %d", s, cfg$veg_label, cfg$run_year)
+  }),
+  names(site_configs)
+)
+
+p_annual_all <- ggplot(mapping = aes(x = doy)) +
+  geom_ribbon(
+    data = ssem_doy_all,
+    aes(ymin = nee_lo, ymax = nee_hi),
+    fill = "steelblue", alpha = 0.30
+  ) +
+  geom_line(
+    data = ssem_doy_all,
+    aes(y = nee_med),
+    colour = "steelblue3", linewidth = 0.5
+  ) +
+  geom_point(
+    data = flux_doy_all,
+    aes(y = nee_gCm2d),
+    colour = "grey20", alpha = 0.40, size = 0.6
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50",
+             linewidth = 0.35) +
+  facet_wrap(
+    ~ factor(site, levels = names(annual_labels_all), labels = annual_labels_all),
+    ncol = 1, scales = "free_y"
+  ) +
+  scale_x_continuous(
+    breaks = c(1, 60, 121, 182, 244, 305, 355),
+    labels = c("Jan", "Mar", "May", "Jul", "Sep", "Nov", "Dec")
+  ) +
+  labs(
+    title    = "Annual daily NEE cycle — all three sites",
+    subtitle = "Blue ribbon: SSEM 95% CI  |  Blue line: SSEM median  |  Grey: FLUXNET daily NEE",
+    x        = "Day of year",
+    y        = expression(NEE ~ (gC ~ m^{-2} ~ day^{-1}))
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    strip.background = element_blank(),
+    strip.text       = element_text(face = "bold", size = 9),
+    panel.spacing    = unit(1.2, "lines")
+  )
+
+ggsave(file.path(out_dir, "02_allsites_annual_daily_cycle.png"), plot = p_annual_all,
+       width = IN_W, height = IN_H * 2.0, dpi = DPI, units = "in")
+report_saved(file.path(out_dir, "02_allsites_annual_daily_cycle.png"))
 
 
 # =============================================================================
@@ -646,6 +817,139 @@ for (chosen_model in c("CESM2", "IPSL-CM6A-LR", "UKESM1-0-LL")) {
          width = IN_W, height = IN_H, dpi = DPI, units = "in")
   report_saved(file.path(out_dir, fname))
 }
+
+
+# =============================================================================
+# PHASE 5 — export output CSVs to exercises/output/
+# =============================================================================
+message("\n=== Exporting CSV files to exercises/output/ ===")
+
+export_dir <- "exercises/output"
+if (!dir.exists(export_dir)) dir.create(export_dir, recursive = TRUE)
+
+# ── README content (written once; referenced by both SSEM and obs exports) ──
+readme_lines <- c(
+  "exercises/output/ — SSEM and FLUXNET output files for Fluxcourse 2026",
+  "Generated by: exercises/generate_review_figures.R (or exercises/02_validation.Rmd)",
+  "Units: all carbon fluxes in gC m-2 day-1 unless noted",
+  "",
+  "================================================================================",
+  "SSEM ensemble daily output",
+  "Files: ssem_DE-Tha.csv, ssem_DK-Sor.csv, ssem_US-MMS.csv",
+  "--------------------------------------------------------------------------------",
+  "Column          Units              Description",
+  "datetime        YYYY-MM-DD         Date of the daily aggregation",
+  "NEP_median      gC m-2 day-1       Ensemble median net ecosystem production",
+  "                                   (positive = ecosystem is a carbon SINK)",
+  "NEP_lower95     gC m-2 day-1       2.5th percentile of ensemble NEP (lower CI bound)",
+  "NEP_upper95     gC m-2 day-1       97.5th percentile of ensemble NEP (upper CI bound)",
+  "GPP_median      gC m-2 day-1       Ensemble median gross primary production",
+  "Ra_median       gC m-2 day-1       Ensemble median autotrophic (plant) respiration",
+  "Rh_median       gC m-2 day-1       Ensemble median heterotrophic (soil microbial) respiration",
+  "",
+  "Source:         SSEM (Super Simple Ecosystem Model, Dietze / Moore)",
+  "Run year:       2000 (DE-Tha, DK-Sor), 2005 (US-MMS)",
+  "Sign:           NEP > 0 = ecosystem gaining carbon (sink); NEE = -NEP",
+  "",
+  "================================================================================",
+  "FLUXNET daily observations",
+  "Files: obs_DE-Tha_daily.csv, obs_DK-Sor_daily.csv, obs_US-MMS_daily.csv",
+  "--------------------------------------------------------------------------------",
+  "Column            Units              Description",
+  "date              YYYY-MM-DD         Calendar date",
+  "NEE_gC_m2_day     gC m-2 day-1       Daily NEE from FLUXNET NEE_VUT_REF",
+  "                                     Positive = atmospheric source (ecosystem losing C)",
+  "GPP_gC_m2_day     gC m-2 day-1       Daily GPP from GPP_NT_VUT_REF (nighttime method)",
+  "RECO_gC_m2_day    gC m-2 day-1       Daily ecosystem respiration from RECO_NT_VUT_REF",
+  "",
+  "Source:         FLUXNET / AmeriFlux FLUXNET2015 product (DD daily files)",
+  "Sites:          DE-Tha (1996-2024), DK-Sor (1996-2024), US-MMS (1999-2023)",
+  "Sign:           NEE > 0 = source; opposite sign from NEP_median in SSEM files",
+  "QC:             All DD rows included; apply QC filters as needed",
+  "",
+  "================================================================================",
+  "CMIP6 monthly model output",
+  "Files: cmip6_CESM2.csv, cmip6_IPSL-CM6A-LR.csv, cmip6_UKESM1-0-LL.csv",
+  "--------------------------------------------------------------------------------",
+  "Column         Units              Description",
+  "model          character          CMIP6 model name",
+  "year           integer            Calendar year",
+  "month          integer            Calendar month (1-12)",
+  "days_in_mo     integer            Days in month (for rate-to-total conversion)",
+  "scenario       character          CMIP6 experiment (historical or ssp585)",
+  "gpp_gCm2d      gC m-2 day-1       Monthly mean GPP rate",
+  "rh_gCm2d       gC m-2 day-1       Monthly mean heterotrophic respiration rate",
+  "ra_gCm2d       gC m-2 day-1       Monthly mean autotrophic respiration rate",
+  "lai_m2_m2      m2 m-2             Monthly mean leaf area index",
+  "",
+  "Source:         CMIP6 historical + SSP5-8.5 extracted from Pangeo Google Cloud",
+  "                catalog at the grid cell nearest to US-MMS (Morgan Monroe, Indiana)",
+  "Models:         CESM2 (NCAR), IPSL-CM6A-LR (IPSL), UKESM1-0-LL (UK Met Office / NERC)",
+  "Note:           CMIP6 grid cells represent ~1 x 1 deg (~100 x 70 km at US-MMS latitude)",
+  "                and blend multiple land cover types; do not expect point-to-grid agreement"
+)
+writeLines(readme_lines, file.path(export_dir, "README_outputs.txt"))
+message("  Saved: README_outputs.txt")
+
+# ── SSEM daily output — all three sites ──────────────────────────────────────
+# NEP = -NEE (positive = carbon sink). Reversing the CI bounds: the lower
+# 2.5th-percentile NEE value (most negative, most sink-like) maps to the
+# upper 97.5th-percentile NEP value when negated.
+for (s in names(site_configs)) {
+  dd <- ssem_daily_list[[s]]
+  ssem_exp <- tibble(
+    datetime    = dd$date,
+    NEP_median  = -dd$nee_med,
+    NEP_lower95 = -dd$nee_hi,   # 97.5th pct NEE → 2.5th pct NEP
+    NEP_upper95 = -dd$nee_lo,   # 2.5th pct NEE → 97.5th pct NEP
+    GPP_median  = dd$gpp_med,
+    Ra_median   = dd$ra_med,
+    Rh_median   = dd$rh_med
+  )
+  out_file <- file.path(export_dir, sprintf("ssem_%s.csv", s))
+  write_csv(ssem_exp, out_file)
+  message(sprintf("  Saved: ssem_%-10s  %d rows", paste0(s, ".csv"), nrow(ssem_exp)))
+}
+
+# ── FLUXNET daily observations — all three sites ─────────────────────────────
+# Load the DD (daily) file for each site to get GPP and RECO in addition to
+# NEE. The Phase 1 HH/HR load only retained NEE, so we read the DD files
+# separately here. These cover the full site record, not just the run year.
+dd_sources <- list(
+  "DE-Tha" = "data/DE-Tha/DE-Tha_DD.csv",
+  "DK-Sor" = "data/DK-Sor/DK-Sor_DD.csv",
+  "US-MMS" = "data/US-MMS/US-MMS_DD.csv"
+)
+
+for (s in names(dd_sources)) {
+  fpath <- dd_sources[[s]]
+  if (!file.exists(fpath)) {
+    message(sprintf("  DD file not found: %s — skipping obs export for %s", fpath, s))
+    next
+  }
+  obs_df <- read_csv(fpath, show_col_types = FALSE,
+                     col_select = c(DATE, NEE_VUT_REF, GPP_NT_VUT_REF, RECO_NT_VUT_REF)) |>
+    mutate(across(where(is.numeric), \(x) replace(x, x == -9999, NA))) |>
+    mutate(
+      date           = as.Date(as.character(DATE)),
+      NEE_gC_m2_day  = NEE_VUT_REF     * UMOL_S_TO_GC_DAY,
+      GPP_gC_m2_day  = GPP_NT_VUT_REF  * UMOL_S_TO_GC_DAY,
+      RECO_gC_m2_day = RECO_NT_VUT_REF * UMOL_S_TO_GC_DAY
+    ) |>
+    select(date, NEE_gC_m2_day, GPP_gC_m2_day, RECO_gC_m2_day)
+  out_file <- file.path(export_dir, sprintf("obs_%s_daily.csv", s))
+  write_csv(obs_df, out_file)
+  message(sprintf("  Saved: obs_%-14s  %d rows", paste0(s, "_daily.csv"), nrow(obs_df)))
+}
+
+# ── CMIP6 monthly output — all three models ──────────────────────────────────
+for (m in unique(cmip6_all$model)) {
+  out_file <- file.path(export_dir, sprintf("cmip6_%s.csv", m))
+  write_csv(cmip6_all |> filter(model == m), out_file)
+  message(sprintf("  Saved: cmip6_%s.csv", m))
+}
+
+message("Export complete — ", length(list.files(export_dir)), " files in ", export_dir, "/")
 
 
 # =============================================================================

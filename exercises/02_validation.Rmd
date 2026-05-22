@@ -894,6 +894,206 @@ bind_rows(cmip6_long, flux_long) |>
 
 ---
 
+## Export data for further analysis
+
+> The chunk below saves the key outputs of this exercise as CSV files that can
+> be read in R, Python, or MATLAB without re-knitting the document. Files are
+> written to `exercises/output/` relative to the repository root.
+
+```{r export_data, echo=TRUE, message=TRUE}
+# ── Create output directory ───────────────────────────────────────────────────
+# output/ here = exercises/output/ on disk (Rmd working directory = exercises/)
+output_dir <- "output"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+# ── SSEM daily output — DE-Tha 2000 ──────────────────────────────────────────
+# Extract autotrophic respiration (Ra, col 7) and heterotrophic respiration
+# (Rh, col 10) from the SSEM output array and aggregate to daily totals.
+# step_conv, day_idx, and ssem_dates were computed in the harmonize chunk.
+daily_ra_ens_ex <- apply(ssem_output[,, 7], 2, function(ens) {
+  tapply(ens, day_idx, sum) * step_conv
+})
+daily_rh_ens_ex <- apply(ssem_output[,, 10], 2, function(ens) {
+  tapply(ens, day_idx, sum) * step_conv
+})
+ra_ci_ex <- apply(daily_ra_ens_ex, 1, quantile, c(0.025, 0.5, 0.975), na.rm = TRUE)
+rh_ci_ex <- apply(daily_rh_ens_ex, 1, quantile, c(0.025, 0.5, 0.975), na.rm = TRUE)
+
+# NEP = -NEE (positive = carbon sink). Reversing the CI bounds when negating:
+# the 2.5th-pct NEE (most sink-like) becomes the 97.5th-pct NEP, and vice versa.
+ssem_export_detha <- tibble(
+  datetime    = ssem_dates,
+  NEP_median  = -ssem_daily$nee_med,
+  NEP_lower95 = -ssem_daily$nee_hi,   # 97.5th pct NEE → 2.5th pct NEP
+  NEP_upper95 = -ssem_daily$nee_lo,   # 2.5th pct NEE → 97.5th pct NEP
+  GPP_median  = ssem_daily$gpp_med,
+  Ra_median   = ra_ci_ex["50%", ],
+  Rh_median   = rh_ci_ex["50%", ]
+)
+write_csv(ssem_export_detha, file.path(output_dir, "ssem_DE-Tha.csv"))
+cat(sprintf("Saved: %s  (%d rows)\n",
+            file.path(output_dir, "ssem_DE-Tha.csv"), nrow(ssem_export_detha)))
+
+# DK-Sor and US-MMS SSEM output is only available when generate_review_figures.R
+# has been run first (it stores the per-site RDS in exercises/review_figures/).
+for (s in c("DK-Sor", "US-MMS")) {
+  rds <- file.path("review_figures", sprintf("ssem_output_%s.rds", s))
+  if (!file.exists(rds)) {
+    cat(sprintf("Skipping ssem_%s.csv — RDS not found (run generate_review_figures.R first)\n", s))
+    next
+  }
+  out_arr <- readRDS(rds)
+  nt      <- dim(out_arr)[1]
+  # Determine run year and step size from the site config used by the review script
+  step_info <- list("DK-Sor" = list(yr = 2000L, mins = 30L),
+                    "US-MMS" = list(yr = 2005L, mins = 60L))
+  yr_s    <- step_info[[s]]$yr
+  mins_s  <- step_info[[s]]$mins
+  spd_s   <- 1440L / mins_s
+  nd_s    <- nt / spd_s
+  conv_s  <- MC * mins_s * SECS_PER_MIN
+
+  nee_m_s  <- -out_arr[,, 6]
+  dates_s  <- seq.Date(as.Date(sprintf("%d-01-01", yr_s)), by = "day", length.out = nd_s)
+  didx_s   <- rep(seq_len(nd_s), each = spd_s)
+
+  mk_daily <- function(mat) apply(apply(mat, 2, \(e) tapply(e, didx_s, sum) * conv_s),
+                                  1, quantile, c(0.025, 0.5, 0.975), na.rm = TRUE)
+  nee_ci_s <- mk_daily(nee_m_s)
+  gpp_ci_s <- mk_daily(out_arr[,, 5])
+  ra_ci_s  <- mk_daily(out_arr[,, 7])
+  rh_ci_s  <- mk_daily(out_arr[,, 10])
+
+  ssem_exp_s <- tibble(
+    datetime    = dates_s,
+    NEP_median  = -nee_ci_s["50%",  ],
+    NEP_lower95 = -nee_ci_s["97.5%",],
+    NEP_upper95 = -nee_ci_s["2.5%", ],
+    GPP_median  =  gpp_ci_s["50%",  ],
+    Ra_median   =   ra_ci_s["50%",  ],
+    Rh_median   =   rh_ci_s["50%",  ]
+  )
+  write_csv(ssem_exp_s, file.path(output_dir, sprintf("ssem_%s.csv", s)))
+  cat(sprintf("Saved: %s  (%d rows)\n",
+              file.path(output_dir, sprintf("ssem_%s.csv", s)), nrow(ssem_exp_s)))
+}
+
+# ── FLUXNET daily observations — all three sites ──────────────────────────────
+# Load the DD (daily) product for each site to get GPP and RECO as well as NEE.
+# harmonize chunk's fluxnet_daily only retained NEE, so we load DD files here.
+obs_dd_files <- list(
+  "DE-Tha" = "../data/DE-Tha/DE-Tha_DD.csv",
+  "DK-Sor" = "../data/DK-Sor/DK-Sor_DD.csv",
+  "US-MMS" = "../data/US-MMS/US-MMS_DD.csv"
+)
+for (s in names(obs_dd_files)) {
+  fpath <- obs_dd_files[[s]]
+  if (!file.exists(fpath)) {
+    cat(sprintf("Skipping obs_%s_daily.csv — DD file not found: %s\n", s, fpath))
+    next
+  }
+  obs_df <- read_csv(fpath, show_col_types = FALSE,
+                     col_select = c(DATE, NEE_VUT_REF, GPP_NT_VUT_REF, RECO_NT_VUT_REF)) |>
+    mutate(across(where(is.numeric), \(x) replace(x, x == -9999, NA))) |>
+    mutate(
+      date           = as.Date(as.character(DATE)),
+      NEE_gC_m2_day  = NEE_VUT_REF     * UMOL_S_TO_GC_DAY,
+      GPP_gC_m2_day  = GPP_NT_VUT_REF  * UMOL_S_TO_GC_DAY,
+      RECO_gC_m2_day = RECO_NT_VUT_REF * UMOL_S_TO_GC_DAY
+    ) |>
+    select(date, NEE_gC_m2_day, GPP_gC_m2_day, RECO_gC_m2_day)
+  out_file <- file.path(output_dir, sprintf("obs_%s_daily.csv", s))
+  write_csv(obs_df, out_file)
+  cat(sprintf("Saved: %s  (%d rows)\n", out_file, nrow(obs_df)))
+}
+
+# ── CMIP6 model output — chosen model ────────────────────────────────────────
+cmip6_out_name <- sprintf("cmip6_%s.csv", chosen_model)
+write_csv(cmip6_chosen, file.path(output_dir, cmip6_out_name))
+cat(sprintf("Saved: %s  (%d rows)\n",
+            file.path(output_dir, cmip6_out_name), nrow(cmip6_chosen)))
+
+# ── README ────────────────────────────────────────────────────────────────────
+readme_lines <- c(
+  "exercises/output/ — SSEM and FLUXNET output files for Fluxcourse 2026",
+  "Generated by: exercises/02_validation.Rmd (or exercises/generate_review_figures.R)",
+  "Units: all carbon fluxes in gC m-2 day-1 unless noted",
+  "",
+  "================================================================================",
+  "SSEM ensemble daily output",
+  "Files: ssem_DE-Tha.csv, ssem_DK-Sor.csv, ssem_US-MMS.csv",
+  "Note: ssem_DK-Sor.csv and ssem_US-MMS.csv require generate_review_figures.R",
+  "      to be run first to generate the per-site RDS cache files.",
+  "--------------------------------------------------------------------------------",
+  "Column          Units              Description",
+  "datetime        YYYY-MM-DD         Date of the daily aggregation",
+  "NEP_median      gC m-2 day-1       Ensemble median net ecosystem production",
+  "                                   (positive = ecosystem is a carbon SINK)",
+  "NEP_lower95     gC m-2 day-1       2.5th percentile of ensemble NEP (lower CI bound)",
+  "NEP_upper95     gC m-2 day-1       97.5th percentile of ensemble NEP (upper CI bound)",
+  "GPP_median      gC m-2 day-1       Ensemble median gross primary production",
+  "Ra_median       gC m-2 day-1       Ensemble median autotrophic (plant) respiration",
+  "Rh_median       gC m-2 day-1       Ensemble median heterotrophic (soil) respiration",
+  "",
+  "Source:         SSEM (Super Simple Ecosystem Model, Dietze / Moore)",
+  "Run year:       2000 (DE-Tha, DK-Sor), 2005 (US-MMS)",
+  "Sign:           NEP > 0 = ecosystem gaining carbon (sink); NEE = -NEP",
+  "",
+  "================================================================================",
+  "FLUXNET daily observations",
+  "Files: obs_DE-Tha_daily.csv, obs_DK-Sor_daily.csv, obs_US-MMS_daily.csv",
+  "--------------------------------------------------------------------------------",
+  "Column            Units              Description",
+  "date              YYYY-MM-DD         Calendar date",
+  "NEE_gC_m2_day     gC m-2 day-1       Daily NEE from FLUXNET NEE_VUT_REF",
+  "                                     Positive = atmospheric source (ecosystem losing C)",
+  "GPP_gC_m2_day     gC m-2 day-1       Daily GPP from GPP_NT_VUT_REF (nighttime method)",
+  "RECO_gC_m2_day    gC m-2 day-1       Daily ecosystem respiration from RECO_NT_VUT_REF",
+  "",
+  "Source:         FLUXNET / AmeriFlux FLUXNET2015 product (DD daily files)",
+  "Sites:          DE-Tha (1996-2024), DK-Sor (1996-2024), US-MMS (1999-2023)",
+  "Sign:           NEE > 0 = source; opposite sign from NEP_median in SSEM files",
+  "QC:             All DD rows included; apply QC filters as needed",
+  "",
+  "================================================================================",
+  "CMIP6 monthly model output",
+  "Files: cmip6_CESM2.csv, cmip6_IPSL-CM6A-LR.csv, cmip6_UKESM1-0-LL.csv",
+  "--------------------------------------------------------------------------------",
+  "Column         Units              Description",
+  "model          character          CMIP6 model name",
+  "year           integer            Calendar year",
+  "month          integer            Calendar month (1-12)",
+  "days_in_mo     integer            Days in month (for rate-to-total conversion)",
+  "scenario       character          CMIP6 experiment (historical or ssp585)",
+  "gpp_gCm2d      gC m-2 day-1       Monthly mean GPP rate",
+  "rh_gCm2d       gC m-2 day-1       Monthly mean heterotrophic respiration rate",
+  "ra_gCm2d       gC m-2 day-1       Monthly mean autotrophic respiration rate",
+  "lai_m2_m2      m2 m-2             Monthly mean leaf area index",
+  "",
+  "Source:         CMIP6 historical + SSP5-8.5 extracted from Pangeo Google Cloud",
+  "                catalog at the grid cell nearest to US-MMS (Morgan Monroe, Indiana)",
+  "Models:         CESM2 (NCAR), IPSL-CM6A-LR (IPSL), UKESM1-0-LL (UK Met Office / NERC)",
+  "Note:           CMIP6 grid cells represent ~1 x 1 deg (~100 x 70 km at US-MMS latitude)",
+  "                and blend multiple land cover types; do not expect point-to-grid agreement"
+)
+writeLines(readme_lines, file.path(output_dir, "README_outputs.txt"))
+cat(sprintf("Saved: %s\n", file.path(output_dir, "README_outputs.txt")))
+
+# ── Student message ───────────────────────────────────────────────────────────
+message("
+Output files saved to exercises/output/
+These files can be read in R, Python, or MATLAB:
+
+  R:       read.csv('exercises/output/ssem_DE-Tha.csv')
+  Python:  import pandas as pd; pd.read_csv('exercises/output/ssem_DE-Tha.csv')
+  MATLAB:  readtable('exercises/output/ssem_DE-Tha.csv')
+
+Column units are documented in exercises/output/README_outputs.txt
+")
+```
+
+---
+
 ## Discussion questions
 
 Work through all four questions before you leave the session. These do not have
