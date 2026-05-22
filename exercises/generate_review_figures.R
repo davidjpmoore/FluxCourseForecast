@@ -191,11 +191,25 @@ for (site_label in names(site_configs)) {
   raw <- raw |> mutate(across(where(is.numeric), \(x) replace(x, x == -9999, NA)))
 
   # ── Parse timestamps ─────────────────────────────────────────────────────────
-  # DE-Tha / DK-Sor: ISO 8601 with trailing Z (e.g. "1996-01-01T00:00:00Z")
+  # DE-Tha / DK-Sor: two formats coexist in the same file:
+  #   "YYYY-MM-DD HH:MM:SS UTC"  — all non-midnight records
+  #   "YYYY-MM-DD UTC"           — midnight records (one per calendar day)
+  # ymd_hms() silently returns NA for the date-only format. Step 2 strips the
+  # " UTC" suffix and parses with ymd(), treating midnight as 00:00:00 UTC.
   # US-MMS: integer YYYYMMDDHHMM (e.g. 200501010000)
   if (cfg$ts_col == "DATETIME_START") {
+    dt_vec <- suppressWarnings(ymd_hms(raw$DATETIME_START, quiet = TRUE))
+    is_dateonly <- is.na(dt_vec)
+    if (any(is_dateonly)) {
+      message(sprintf("  Two-step parse: %d midnight rows recovered (YYYY-MM-DD UTC format)",
+                      sum(is_dateonly)))
+      dt_vec[is_dateonly] <- as.POSIXct(
+        suppressWarnings(ymd(sub(" UTC$", "", raw$DATETIME_START[is_dateonly]))),
+        tz = "UTC"
+      )
+    }
     raw <- raw |>
-      mutate(datetime = suppressWarnings(ymd_hms(DATETIME_START, quiet = TRUE))) |>
+      mutate(datetime = dt_vec) |>
       filter(!is.na(datetime))
   } else {
     raw <- raw |>
@@ -246,14 +260,14 @@ for (site_label in names(site_configs)) {
     select(datetime, PAR, temp) |>
     pivot_longer(c(PAR, temp), names_to = "var", values_to = "val") |>
     mutate(label = if_else(var == "PAR",
-                           "PAR (μmol photon m⁻² s⁻¹)",
+                           "PAR (umol photon m-2 s-1)",
                            "Air temperature (°C)")) |>
     ggplot(aes(x = datetime, y = val)) +
       geom_line(linewidth = 0.1, alpha = 0.35, colour = "grey20") +
       facet_wrap(~ label, ncol = 1, scales = "free_y") +
       labs(
         title    = sprintf("Meteorological drivers — %s %d", site_label, cfg$run_year),
-        subtitle = sprintf("SW_IN_F (W m⁻²) × 2.1 = PAR  |  %d-min timestep",
+        subtitle = sprintf("SW_IN_F (W m-2) x 2.1 = PAR  |  %d-min timestep",
                            cfg$step_mins),
         x = NULL, y = NULL
       ) +
@@ -371,7 +385,7 @@ for (site_label in names(site_configs)) {
       .groups     = "drop"
     )
 
-  message(sprintf("SSEM sub-daily: %d rows | SSEM daily: %d rows | Annual GPP median: %.0f gC m⁻² yr⁻¹",
+  message(sprintf("SSEM sub-daily: %d rows | SSEM daily: %d rows | Annual GPP median: %.0f gC m-2 yr-1",
                   nrow(ssem_subdaily_list[[site_label]]),
                   nrow(ssem_daily_list[[site_label]]),
                   sum(ssem_daily_list[[site_label]]$gpp_med, na.rm = TRUE)))
@@ -792,8 +806,8 @@ for (chosen_model in c("CESM2", "IPSL-CM6A-LR", "UKESM1-0-LL")) {
       facet_wrap(
         ~ variable, ncol = 1, scales = "free_y",
         labeller = as_labeller(c(
-          GPP = "GPP (gC m⁻² day⁻¹)",
-          Rh  = "Rh / RECO (gC m⁻² day⁻¹) — note: RECO > Rh"
+          GPP = "GPP (gC m-2 day-1)",
+          Rh  = "Rh / RECO (gC m-2 day-1) -- note: RECO > Rh"
         ))
       ) +
       scale_colour_manual(
@@ -802,7 +816,7 @@ for (chosen_model in c("CESM2", "IPSL-CM6A-LR", "UKESM1-0-LL")) {
       scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
       labs(
         title    = paste("Monthly GPP and Rh —", chosen_model, "vs FLUXNET US-MMS"),
-        subtitle = "1999–2014  |  gC m⁻² day⁻¹  |  Thick lines: LOESS trend",
+        subtitle = "1999-2014  |  gC m-2 day-1  |  Thick lines: LOESS trend",
         x = NULL, y = NULL, colour = NULL
       ) +
       theme_classic(base_size = 12) +

@@ -531,10 +531,10 @@ ggplot(mapping = aes(x = datetime)) +
   ) +
   labs(
     title    = "Sub-daily NEE — July comparison across three temperate forest sites",
-    subtitle = paste("Units: μmol CO₂ m⁻² s⁻¹  |  + = source  |",
+    subtitle = paste("Units: umol CO2 m-2 s-1  |  + = source  |",
                      "SSEM shown for DE-Tha 2000 only"),
     x        = NULL,
-    y        = expression(NEE ~ (μmol ~ CO[2] ~ m^{-2} ~ s^{-1}))
+    y        = expression(NEE ~ (umol ~ CO[2] ~ m^{-2} ~ s^{-1}))
   ) +
   theme_classic(base_size = 12) +
   theme(strip.background = element_blank(),
@@ -610,7 +610,7 @@ ggplot(mapping = aes(x = doy)) +
   ) +
   labs(
     title    = "Annual cycle of daily NEE — most recent complete year per site",
-    subtitle = paste("Units: gC m⁻² day⁻¹  |  + = source  |",
+    subtitle = paste("Units: gC m-2 day-1  |  + = source  |",
                      "SSEM shown for DE-Tha 2000 only"),
     x        = "Day of year",
     y        = expression(NEE ~ (gC ~ m^{-2} ~ day^{-1}))
@@ -854,7 +854,7 @@ bind_rows(cmip6_long, flux_long) |>
     scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
     labs(
       title    = paste("Monthly GPP and Rh —", chosen_model, "vs FLUXNET US-MMS"),
-      subtitle = "1999–2014 | gC m⁻² day⁻¹ | Thick lines: LOESS trend",
+      subtitle = "1999-2014 | gC m-2 day-1 | Thick lines: LOESS trend",
       x        = NULL,
       y        = NULL,
       colour   = NULL
