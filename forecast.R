@@ -1,7 +1,6 @@
 ## Configuration
 library(tidyverse)
 source("R/functions.R")
-n_submit = 50         ## sample size of ensemble members submitted to EFI
 timestep = 3600       ## seconds, driven by timestep of met data
 #SITE_ID  = "NIWO"     ## NEON site code
 targets <- readr::read_csv("https://data.ecoforecast.org/neon4cast-targets/terrestrial_30min/terrestrial_30min-targets.csv.gz", guess_max = 1e6)
@@ -10,8 +9,6 @@ sites <- unique(targets$site_id)
 outdir   = "forecast" ## where should forecasts be saved locally before submitting
 dir.create(outdir,showWarnings = FALSE)
 dir.create("analysis",showWarnings = FALSE) ## should already exist
-## ONE TIME: to initiate workflow, copy calibration analysis to day before start date
-## e.g. cp analysis/2015-07-01.RDS analysis/2022-07-01.RDS
 
 ######## Get previous Analysis output ########
 Analysis.files = dir("analysis")

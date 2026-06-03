@@ -44,7 +44,8 @@ SSEM <- compiler::cmpfun(SSEM.orig)  ## byte compile the function to make it fas
 ##` @param X       Initial Conditions [leaf carbon, wood carbon, soil organic carbon] (units=Mg/ha)
 ##` @param params   model parameters
 ##` @param inputs   model drivers (air temperature, PAR)
-ensemble_forecast <- function(X,params,inputs){
+##` @param verbose  provide a counter on elapsed time
+ensemble_forecast <- function(X,params,inputs,verbose=FALSE){
   nt = nrow(inputs)
   output = array(0.0, c(nt, ne, 12))        ## output storage [time step,ensembles,variables]
   if(length(dim(inputs)) < 3){              ## add ens dim to non-ensemble met
@@ -58,85 +59,11 @@ ensemble_forecast <- function(X,params,inputs){
   for(t in 1:nt){
     output[t, , ] <- SSEM(X, params, as.data.frame(inputs[t, , ]))  ## run model, save output
     X <- output[t, , 1:3]                          ## set most recent prediction to be the next IC
-    if((t %% 336) == 0) print(t)             ## counter: weeks elapsed (7*48 = 1 week)
+    if((t %% 1440) == 0) print(t)             ## counter: elapsed time (30*48 = approx 1 month)
   }
   output[is.nan(output)] = 0
   output[is.infinite(output)] = 0
   return(output) 
-}
-
-######   PARTICLE FILTER   #########
-
-##` Kernel density smoother of parameter values
-##` @param  params  data.frame of model parameters
-##` @param  h       smoothing weight (1 = no smoothing, 0 = iid redraw based on mean and cov)
-smooth.params <- function(params,h=1){
-  params.star = params
-  thetaBar = colMeans(params)
-  SIGMA = cov(params)
-  epsilon = mvtnorm::rmvnorm(ne,rep(0,ncol(params)),SIGMA) ## propose deviations
-  ## Kernel Smooth each row
-  for(i in 1:nrow(params.star)){
-    params.star[i,] = thetaBar + h*(params[i,] - thetaBar) + epsilon[i,]*sqrt(1-h^2)
-  }
-  ## enforce constraints
-  params.star[params.star < 0] = 0
-  falloc = params.star[,c("falloc.1","falloc.2","falloc.3")]
-  falloc = falloc / rowSums(falloc)  ## fractional allocation needs to sum to 1
-  params.star[,c("falloc.1","falloc.2","falloc.3")] = falloc
-  return(params.star)
-}
-
-##` Particle filter
-##` Updates state and parameter weights based on likelihood of the data
-##` Will resample-move if effective sample size drops to <50%
-##`
-##` @param out    ensemble forecast output (matrix)
-##` @param params model parameters (matrix)
-##` @param dat    data mean and uncertainty (data.frame)
-##` @param wt     prior ensemble weight (vector)
-ParticleFilter <- function(out,params,dat,wt=1){
-  
-  ## grab current state variables (last time step)
-  X = out[dim(out)[1], , 1:3]
-  
-  if(sum(!is.na(dat$nep)) == 0){ ## if there's no data, Analysis = Forecast
-    return(list(params=params,X=X, wt=wt))
-  }
-  
-  ## calculate the cumulative likelihoods to be used as PF weights
-  like = rep(0,ne)
-  mult = 1 ## uncertainty multiplier
-  while(all(like <= 0)){ ## HACK in case obs errors are too small to calculate any likelihood at all
-    for(i in 1:ne){
-      like[i] = exp(sum(dnorm(dat$nep, out[,i,6], dat$sigma.nep*mult, log = TRUE),na.rm = TRUE))  ## calculate log likelihoods
-    }
-    mult = mult*2 
-  }
-  new_wt = like * wt ## update weights
-  
-  if ( all(new_wt == 0) ){
-    new_wt = (like/sum(like)) * (wt / sum(wt))
-  }
-  wt = new_wt
-  ## hist(wt,main="Ensemble Weights")  ## useful diagnostic if you're running line-by-line
-  
-  ## calculate effective sample size
-  wtn = wt/sum(wt)          ## normalized weights
-  Neff = 1/sum(wtn^2)
-  
-  
-  
-  ## check if effective size has dropped below 50% threshold
-  if(Neff < ne/2){
-    ## resample ensemble members in proportion to their weight
-    index = sample.int(ne, ne, replace = TRUE, prob = wtn) 
-    X = X[index, ]                                ## update state
-    params = smooth.params(params[index,],h=0.95) ## kernel smooth updated parameters
-    wt = rep(1,ne)                                ## if resample, reset weights
-  }
-  return(list(params=params,X=X, wt=wt))  ## analysis updates parameters, state, and weights
-  
 }
 
 ######   VISUALIZATION  #########
@@ -192,7 +119,7 @@ plot_forecast <- function(out,sample=FALSE){
     lines(ci[2, ])   ## plot median
     if(sample){
       for(j in seq_len(sample)){
-        lines(out[,j,i],lty=2)
+        lines(out[,j,i],lty=2,col=2)
       }
     }
   }
