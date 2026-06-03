@@ -1,6 +1,6 @@
 ---
-title: "Carbon Forecast"
-author: "Flux Course 2023"
+title: "Flux Course 2026: Carbon cycle model-data fusion"
+author: "Michael Dietze"
 output: html_document
 ---
 
@@ -8,51 +8,21 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 library(compiler)
 library(tidyverse)
-library(mvtnorm)
-library(EML)
-#remotes::install_github("eco4cast/EFIstandards")
-#library(EFIstandards)
+#library(mvtnorm)
 source("R/functions.R")
 source("R/utils.R")
 
 ## configuration
 
 #### SET THE ENSEMBLE SIZE
-ne = 500 ## production run should be 200 - 5000, depending on what your computer can handle
+ne = 50 ## should be 200 - 5000, depending on what your computer can handle
 
 timestep = 1800 #seconds
 
 start_date = as.Date("2015-07-01")
-horiz_calib = 1  #day   forecast horizon during calibration
-horiz       = 35 #days, forecast horizon during forecast
 
 outdir = "./" ## output directory for saving files
 ```
-
-# Why Forecast
-
-* Accelerate Science
-* Improve Decision Making
-
-
-# What: NEON Forecast Challenge Flux Forecast
-
-* 35 days ahead (NOAA GEFS ensemble weather forecast)
-* subdaily timestep
-* NEON fluxes updated daily (5 day latency)
-* Able to submit daily
-
-More info is available at https://ecoforecast.org/efi-rcn-forecast-challenges/
- 
-# How: Forecast Analysis Cycle
-
-* Forecast step -> Uncertainty propagation
-* Analysis step -> Bayes' theorem
-  
-If you liked the Forecast-Analysis Cycle you may also like...
-
-* Dietze M. 2017. Ecological Forecasting. Princeton University Press
-* Dietze et al 2018. Iterative near-term ecological forecasting: Needs, opportunities, and challenges. PNAS 115 (7) 1424-1432 https://doi.org/10.1073/pnas.171023111
 
 # Super Simple Ecosystem Model
 
@@ -60,20 +30,27 @@ Let's begin by defining our model itself, as well as a number of ancillary
 functions that will be useful in simulation and analysis. The model below is 
 very simple but is complex enough to have some chance at capturing observed 
 variability. In addition, unlike most ecosystem models, it explicitly contains 
-process error. The model has three state variables (X) that are all expressed in
-terms of carbon (Mg/ha): Leaf Biomass, Structural Biomass (wood, roots, etc),
-and soil organic matter (SOM). The model also has only two drivers: 
-photosynthetically active radiation (PAR), and air temperature. Within the model we first 
-estimate LAI from Leaf Biomass and SLA. Using LAI and light we estimate GPP 
-using a simple light use efficiency approach. GPP is then allocated to 
-autotrophic respiration (Ra), leaf NPP, and woody NPP. These leaf and wood 
-biomass pools can then turns over into SOM as litterfall and Coarse Woody Debris / mortality. 
-Heterotrophic respiration is assumed to follow a standard Q10 temperature 
-sensitivity. Finally, Normal process error is added to X.
+process error. FYI the code for this model lives in R/functions.R.
 
 ```{r}
 SSEM.orig
 ```
+
+In terms of inputs, the model has three state variables (X) that are all expressed in
+terms of carbon (Mg/ha): Leaf Biomass (X[,1]), Structural Biomass (wood, roots, etc; X[,2]),
+and soil organic matter (SOM; X[,3]). The modeled variables are thus the columns of X, while (as we'll see shortly) the different rows represent different replicate ensemble members. To be able to run the model we'll need to define the starting values of these variables (see **Initial Conditions**)
+
+The model also has only two drivers, photosynthetically active radiation (PAR) and air temperature. We pass these into the model as a data frame "inputs" with columns "PAR" and temp" (see **Drivers**). The model parameters are similarly passed in through the data frame "params" and are defined in the **Parameters** section below. Finally the model parameter "timestep" controls the model timestep and defaults to 30 min (1800 seconds) as this is the timestep of the meteorological inputs and eddy flux data that we'll use for calibration.
+
+Within the model we first 
+estimate LAI from Leaf Biomass and specific leaf area (SLA). Using LAI and light we estimate GPP 
+using a simple light use efficiency approach. GPP is then allocated to 
+autotrophic respiration (Ra), leaf NPP, and woody NPP based on fixed allocation fractions. These leaf and wood 
+biomass pools can then turns over into SOM as litterfall and Coarse Woody Debris / mortality assuming fixed turnover rates. 
+SOM is then lost via heterotrophic respiration, which is assumed to be proportional to the size of the SOM pool and to follow a standard Q10 temperature 
+sensitivity. Finally, Normal process error is added to all columns in X to account for model inadequacy. 
+
+
 
 # Initial Conditions
 
@@ -109,7 +86,7 @@ There are a few assumptions in developing the initial conditions
 #write_csv(x=badm,file="data/US-NR1_BADM.csv")
 #Bwood = badm %>% filter(VARIABLE == "AG_BIOMASS_TREE") %>% select(DATAVALUE) %>% type_convert() ## unsuccessful crack at automating extraction
 Bwood = 14500 * 1e-6 * 10000 ## convert g/m2 -> Mg/ha
-Bleaf = 2950 * 0.01  ## generates a LAI that is too high ***
+Bleaf = 2950 * 0.01 * 4.2/14 ## last term is a correction factor as raw obs generates a LAI that is too high
 SOM = c(1.57, 1.58) + c(0.49, 1.39) + c(2.06, 2.59) * 1e-3 * 10000 ## sum up litter, CWD, and soil; change units (US-ME2)
 X = as.matrix(c(mean(Bleaf), mean(Bwood), mean(SOM)))
 ### sample initial condition ensemble members
@@ -148,6 +125,7 @@ plot(inputs$date,inputs$temp,type='l')
 
 # Parameters: Priors & Direct constraints (trait data)
 
+This section defines our initial _a priori_ estimates of the model parameters before we confront the model with the observed eddy covariance data. As you see below, these are defined through a combination of site-specific trait data, literature values, and expert option. In all cases we aimed to define not just a single "default" value for the parameters but also our _a priori_ uncertainty. This prior uncertainty is important for understanding model sensitivity/uncertainty and for constraining the model calibration. For example, if a particular parameter is well known based on trait data, we wouldn't want to give it as much "wiggle room" as parameters that are based on rough guesses.
 ```{r}
 ## ancillary data from Ameriflux BADM metadata
 SLA = 1e3/c(193.7,205.1,237.7)     ## m2/kg
@@ -214,22 +192,25 @@ params = as.data.frame(params)
 plot_params(params)
 ```
 
-# Forecast Step: Monte Carlo Error Propagation
+# Prior Predictive Checks: Monte Carlo Error Propagation
+
+As defined, our SSEM model only predicts one timestep into the future. To run this model forward for a full year (or longer) we're going to define a helper function `ensemble_forecast` that runs SSEM recursively, taking the outputs from one timestep and feeding them back in as the initial conditions for the next timestep.
 
 *Ensemble forecast function*
 ```{r}
 ensemble_forecast
 ```
 
-*Run first forecast*
+*Run model forward*
 ```{r}
-dayInputs = inputs %>% dplyr::filter(date >= start_date, date < start_date + lubridate::days(horiz_calib))
 output.ensemble = ensemble_forecast(X = X.orig,
                                     params = params,
-                                    inputs = dayInputs[,2:3]) ## don't feed date col'n to model 
+                                    inputs = inputs[,2:3], ## don't feed date col'n to model 
+                                    verbose= TRUE) 
 ```
 
 *Plot timeseries*
+Here we'll visualize both the 95% interval estimate, the median (black) and a random sample of 5 ensemble members (red) as examples
 ```{r}
 plot_forecast(output.ensemble,sample=5)
 ```
@@ -252,30 +233,53 @@ At the half-hourly or hourly resolution, the _QC variable indicates if the corre
 ci = apply(output.ensemble[, ,6], 1, quantile, c(0.025, 0.5, 0.975)) ## forecast confidence interval
                                                                      ## variable 6 = NEP
 ## observations
-today = which(date >= start_date & date < start_date + horiz_calib)
-nep = -flux$NEE_VUT_REF[today] ## change sign convention
-nep.qc = flux$NEE_VUT_REF_QC[today]
-nep.unc = flux$NEE_VUT_REF_JOINTUNC[today]
+nep = -flux$NEE_VUT_REF ## change sign convention
+nep.qc = flux$NEE_VUT_REF_QC
+nep.unc = flux$NEE_VUT_REF_JOINTUNC
 
 ## plot timeseries
 ylim = range(c(range(ci),range(nep,na.rm=TRUE)))
-plot(dayInputs$date,ci[2,],ylim=ylim,col=1,pch=18)
-ciEnvelope(dayInputs$date, ci[1, ], ci[3, ], col = col.alpha("lightGrey", 0.5))
-points(dayInputs$date,nep,col=nep.qc+1)
-legend("topright",legend=c("model",paste("QC",0:2)),
-       pch = c(18,rep(1,3)),
-       col=  c(1,1:3))
+plot(inputs$date,ci[2,],ylim=ylim,col=1,pch=18,cex=0.2)
+ciEnvelope(inputs$date, ci[1, ], ci[3, ], col = col.alpha("lightGrey", 0.5))
+points(inputs$date,nep,col=nep.qc+1,cex=0.02)
+legend("topright",legend=c("model",paste("QC",0:3)),
+       pch = c(18,rep(1,4)),
+       col=  c(1,1:4))
 
 ## predicted/observed plot
-plot(ci[2,],nep,col=nep.qc+1)
+plot(ci[2,],nep,col=nep.qc+1,cex=0.2)
 abline(0,1,lty=2)
 ```
+
+In addition to these simple pre-calibration checks, there are a wide range of additional checks one can do to visually assess model performance, including but not limited to: 
+
+* plots averaging over specific timescales (e.g., mean diurnal curve, mean seasonal curve, daily or monthly timeseries, "fingerprint" heatmaps of day-of-year by time-of-day) 
+* plots of functional responses (e.g., predicted and observed relationships with temp and PAR)
+
+TODO: add example code or link to validation lab
+
+Also, in terms of assessing overall model performance it is critical to look at as many pools and fluxes as possible, not just NEE. I recommend the following order of assessment, which can be helpful for isolating the specific processes that may be miscalibrated or misrepresented in the model
+
+1. LAI - should primarily be sensitive to initial conditions and SLA
+2. unstressed GPP - should primarily be sensitive to photosythetic parameters. If you get the right GPP with the wrong LAI, you got the wrong GPP
+3. stressed GPP - checks stress responses (e.g., moisture deficit), usually done by filtering the observed data for specific covariate conditions
+4. NPP, biomass, biomass increment - if GPP is correct, this primarily checks autotrophic respiration, but also allocation and turnover
+5. leaf and root litter, CWD - if NPP is correct, this primarily checks turnover and secondarily allocation
+6. SOC - should primarily be sensitive to initial conditions
+7. Soil respiration - primarily checks Rh. Functional responses can be particularly valuable. If you get Rh right but SOC wrong, you got Rh wrong
+8. NEE - puts everything together. In can be hard to assess model errors from NEE alone, but diurnal curves can help separate errors in Re vs GPP
+9. Soil Moisture (SM)
+10. LE - I often check this much earlier for sites that have a strong carbon/water coupling
 
 If you liked model assessment, you might also like...
 
 * Model selection (AIC, DIC, wAIC, Predictive Loss)
 * Model averaging
 * Quantile-based model diagnostics & Continuous Rank Probability Score (CRPS)
+
+# Quantitative skill scores
+
+
 
 # Analysis Step: Particle Filter
 
