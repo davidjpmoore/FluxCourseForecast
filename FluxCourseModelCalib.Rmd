@@ -323,6 +323,10 @@ knitr::kable(sens[order(abs(sens),decreasing = TRUE)])
 
 # Cost Functions & Likelihoods
 
+* What is a Likelihood?
+* How does it allow us to update model parameters?
+
+
 ```{r}
 sens_plot(var=3,line=FALSE) ## RMSE (minimize)
 sens_plot(var=4,line=FALSE) ## bias (want as close as possible to 0)
@@ -330,15 +334,15 @@ sens_plot(var=5,line=FALSE) ## correlation (maximize)
 ```
 
 ```{r}
-theta_bar = data.frame(t(apply(params, 2, mean)))
-theta_bar$sigma = stats["pre","RMSE"]
+theta_bar = t(apply(params, 2, mean))
+theta_bar[10] = stats["pre","RMSE"]
 theta_range = apply(params, 2, range) 
-Xbar      = apply(X.orig,2,mean)
+Xbar      = matrix(apply(X.orig,2,mean),nrow=1)
 
 likelihood <- function(param,Obs){
-  param = t(data.frame(param))
+  param = data.frame(t(param))
+  colnames(param) = c(colnames(params),"sigma")
   print(param)
-  class(param)
   Model = ensemble_forecast(X = Xbar,
                             params = param[,1:9],
                             inputs = inputs[,2:3]) 
@@ -347,7 +351,7 @@ likelihood <- function(param,Obs){
 }
 
 #lnL at the current parameter mean values
-L0 = likelihood(param=t(theta_bar),Obs=O)
+L0 = likelihood(param=theta_bar,Obs=O)
 
 ```
 
@@ -359,37 +363,10 @@ system.time({
               hessian=TRUE,Obs=O)
 })
 ```
+#    user   system  elapsed 
+# 3013.518   17.341 4280.111 
 
-
-# Analysis Step: Particle Filter
-
-* What is a Likelihood?
-* What is Bayes Theorem?
-* How does it allow us to update model parameters and states?
-* How does a Particle Filter work?
-
-```{r}
-ParticleFilter
-```
-
-
-```{r}
-Analysis = list() ## storage for saving PF output
-
-## data constraints, day 1
-nep[nep.qc>0] = NA                   ## only use true observations, not gap-filled values
-dat = data.frame(nep = nep,
-                 sigma.nep = nep.unc
-                )
-## run PF
-Analysis[[1]] = ParticleFilter(output.ensemble,params,dat,wt = rep(1,ne))
-
-# Save the Analysis
-dir.create("demo_analysis",showWarnings = FALSE)
-saveRDS(Analysis[[1]],file=file.path("demo_analysis",paste0(start_date,".RDS")))
-```
-
-If you liked the Particle Filter, you may also like...
+If you liked model calibration, you may also like...
 
 * Markov Chain Monte Carlo (MCMC)
   * JAGS, NIMBLE
@@ -398,270 +375,113 @@ If you liked the Particle Filter, you may also like...
 * State Space Models
 * Kalman Filter
 * Ensemble Kalman Filter
+* Particle Filter
 * Using uncertainty analysis (Sobol, Monte Carlo, etc) to reduce the number of parameters considered
 
 
-# Workflow
+# Post-calibration prediction
 
-Now let's put the Forecast and Analysis steps into an iterative cycle so that we can calibrate the model
-
-```{r}
-ndays = 30                                              ## number of days to run the forecast
-
-t0 = which(date == start_date)                          ## row number of time 0 
-forecast <- array(NA,c(86400/timestep*(ndays+1),ne,12)) ## output storage [time, ensemble, state]
-forecast[1:dim(output.ensemble)[1],,] = output.ensemble ## store first forecast
-
-for(t in 1:ndays){
-  
-  today = which(date >= (start_date + t) & date < (start_date + horiz_calib + t))
-  
-  # Today's forecast
-  out = ensemble_forecast(X = Analysis[[t]]$X,           ## initial conditions = yesterday's Analysis
-                          params = Analysis[[t]]$params, ## today's parameters = yesterday's Analysis
-                          inputs = inputs[today,2:3])    ## today's subset of meteorology     
-  forecast[today-t0+1,,] = out                           ## store today's forecast in overall array
-  
-  # Today's data constraints
-  nep = -flux$NEE_VUT_REF[today]
-  nep.qc = flux$NEE_VUT_REF_QC[today]
-  nep[nep.qc>0] = NA
-  dat = data.frame(nep = nep,
-                   sigma.nep = flux$NEE_VUT_REF_JOINTUNC[today]
-                  )
-  
-  # Today's analysis
-  Analysis[[t+1]] = ParticleFilter(out,Analysis[[t]]$params, dat,wt = Analysis[[t]]$wt)
-  
-  # Save the Analysis
-  saveRDS(Analysis[[t+1]],file=file.path("demo_analysis",paste0(start_date+t+1,".RDS")))
-
-  
-  # counter to help us know things are still running
-  print(t)
-}
-
-# Save the Analysis List
-saveRDS(Analysis,file="AnalysisList.RDS")
-
-## effective sample size over time
-weights = sapply(Analysis,function(x){x$wt})
-Neff = apply(weights,2,function(x){
-  wtn = x/sum(x)
-  return(1/sum(wtn^2))})
-plot(Neff,type='l')
-abline(v=which(Neff > 0.999*ne),lty=3)
+```{r,fig.asp=1}
+## updated parameter sample
+mu = fit$par
+H = abs(diag((fit$hessian + t(fit$hessian))/2))
+#sigma = solve(H, tol = 1e-25)
+#sigma = MASS::ginv(-H)
+sigma = diag(1/H)
+params_new = as.data.frame(mvtnorm::rmvnorm(ne,mu,sigma))
+colnames(params_new) = c(colnames(params),"sigma")
+plot_params(params_new)
 ```
 
-# Forecast Visualizations
+
+```{r}
+calibrated.ensemble = ensemble_forecast(X = X.orig,
+                                    params = params_new,
+                                    inputs = inputs[,2:3], ## don't feed date col'n to model 
+                                    verbose= TRUE) 
+```
+
+
+
+
+
+
+
+
+
+
 
 Timeseries for all variables
 ```{r}
-plot_forecast(forecast)
-```
+plot_forecast(calibrated.ensemble,sample=5)
 
+## model
+ci.new = apply(calibrated.ensemble[, ,6], 1, quantile, c(0.025, 0.5, 0.975)) ## forecast confidence interval
+                                                                     ## variable 6 = NEP
+## plot timeseries
+ylim = range(c(range(ci.new),range(nep,na.rm=TRUE)))
+plot(inputs$date,ci.new[2,],ylim=ylim,col=1,pch=18,cex=0.2)
+ciEnvelope(inputs$date, ci.new[1, ], ci.new[3, ], col = col.alpha("lightGrey", 0.5))
+points(inputs$date,nep,col=nep.qc+1,cex=0.02)
+legend("topright",legend=c("model",paste("QC",0:3)),
+       pch = c(18,rep(1,4)),
+       col=  c(1,1:4))
 
-Validation against NEP
-```{r}
-## Timeseries
-days = which(date >= start_date & date < start_date + horiz_calib + ndays)
-nep = -flux$NEE_VUT_REF[days]
-nep.qc = flux$NEE_VUT_REF_QC[days]
-ci = apply(forecast[, ,6], 1, quantile, c(0.025, 0.5, 0.975))
-ylim = range(c(range(ci),range(nep,na.rm=TRUE)))
-plot(date[days],ci[2,],ylim=ylim,col=1, pch=18,ylab="NEP",type="b")
-#ciEnvelope(date[days], ci[1, ], ci[3, ], col = col.alpha("lightGrey", 0.5))
-points(date[days],nep,col=nep.qc+1)
-legend("topright",legend=c("model",paste("QC",0:2)),
-       pch = c(18,rep(1,3)),
-       col=  c(1,1:3))
-## predicted/observed
-plot(ci[2,],nep,col=nep.qc+1,xlab="model")
+## predicted/observed plot
+plot(ci[2,],nep,col=nep.qc+1,cex=0.2)
 abline(0,1,lty=2)
 
-```
+## smoothed daily time series
+date = as_date(inputs$date)
+daily.nep = tapply(nep,date,mean,na.rm=TRUE)
 
-Compare initial and final parameters
-```{r,fig.asp=1}
-plot_params(Analysis[[t+1]]$params,params)
-```
+daily.calibrated = apply(calibrated.ensemble[,,6],2,
+                         function(x){tapply(x,date,mean,na.rm=TRUE)})
+daily.cal.ci = apply(daily.calibrated, 1, quantile, c(0.025, 0.5, 0.975))
 
+daily.orig = apply(output.ensemble[,,6],2,
+                         function(x){tapply(x,date,mean,na.rm=TRUE)})
+daily.orig.ci = apply(daily.orig, 1, quantile, c(0.025, 0.5, 0.975))
 
-How did parameters evolve over time?
-```{r}
-## parameter timeseries
-for(i in 1:12){
-  p = sapply(Analysis,function(x){
-    wtd.quantile(x$params[,i],x$wt,c(0.025,0.5,0.975))
-  })
-  time = start_date + 0:ndays
-  
-  plot(time,p[2,],ylim=range(p),ylab=names(params)[i])
-  ciEnvelope(time,p[1,],p[3,],col=col.alpha("lightblue",0.5))
-}
-```
+ylim = range(c(range(daily.orig.ci),range(daily.cal.ci),range(daily.nep,na.rm=TRUE)))
+doy  = sort(unique(date))
+plot(doy,daily.orig.ci[2,],ylim=ylim,col=1,pch=18,cex=0.5)
+ciEnvelope(doy, daily.orig.ci[1, ], daily.orig.ci[3, ], col = col.alpha("lightGrey", 0.5))
+points(doy,daily.cal.ci[2,],col=4,pch=18,cex=0.5)
+ciEnvelope(doy, daily.cal.ci[1, ], daily.cal.ci[3, ], col = col.alpha("lightBlue", 0.5))
+points(doy,daily.nep,col=2,cex=0.5)
+legend("topright",legend=c("data","orig","calib"),
+       pch = c(18,rep(1,3)),
+       col=  c(2,1,4))
 
+## daily predicted/observed
+plot(daily.orig.ci[2,],daily.nep,ylim=ylim,xlim=ylim)
+points(daily.cal.ci[2,],daily.nep,col=4)
+abline(0,1,col=2,lty=2)
 
-# EFI Standard: output and metadata
+## mean diurnal curve
+tod = inputs$date - as.POSIXct(date)-5
+nep.diurnal = tapply(nep,tod,mean)
+time.of.day = as.numeric(names(nep.diurnal))
+cal.diurnal = tapply(ci.new[2,],tod,mean)
+orig.diurnal = tapply(ci[2,],tod,mean)
 
-To be able to submit the forecast to the NEON challenge, we need to reorganize the output into community standard (long data frame) and generate metadata about the forecast
+ylim=range(c(range(cal.diurnal),range(orig.diurnal),range(nep.diurnal,na.rm=TRUE)))
+plot(time.of.day,nep.diurnal,col=2,ylim=ylim)
+lines(time.of.day,orig.diurnal)
+lines(time.of.day,cal.diurnal,col=4)
+legend("topright",legend=c("data","orig","calib"),
+       pch = c(18,rep(1,3)),
+       col=  c(2,1,4))
 
-```{r}
-## reorganize data in long format
-dimnames(output.ensemble) <- list(as.character(date[today]),as.character(1:ne),varnames) ## label array dimensions
-fx = as.data.frame.table(output.ensemble)                                       ## reorganize into long foremat
-colnames(fx) = c("datetime","ensemble","variable","prediction")                 ## label columns
-fx_file = file.path(outdir,paste0("terrestrial_30min-",start_date,"-SSEM.csv")) ## output filename
-write_csv(fx,fx_file)
-head(fx)
-
-## metadata
-
-## define variable names, units, etc
-attributes <- tibble::tribble(
- ~attributeName,     ~attributeDefinition,                          ~unit,                  ~formatString, ~numberType, ~definition,
- "time",              "[dimension]{time}",                          "year",                 "YYYY-MM-DD HH:MM:SS",  "numberType", NA,
- "ensemble",          "[dimension]{index of ensemble member}",      "dimensionless",         NA,           "integer",    NA,
-) 
-variables = cbind(varnames,rep("[variable]",12),units,rep(NA,12),rep("real",12),rep(NA,12))
-colnames(variables) = colnames(attributes)
-attributes <- rbind(attributes,variables)
-attributes
-attrList <- set_attributes(attributes, 
-                           col_classes = c("Date", "numeric", rep("numeric",nrow(variables))))
-
-## sets metadata about the file itself (name, file type, size, MD5, etc)
-physical <- set_physical(fx_file, recordDelimiter='\n')
-
-## set metadata for the file as a whole
-dataTable <- eml$dataTable(
-                 entityName = "forecast",  ## this is a standard name 
-                 entityDescription = "Carbon cycle forecast for US-NR1",
-                 physical = physical,
-                 attributeList = attrList)
-
-me <- list(individualName = list(givenName = "Mike", 
-                                 surName = "Dietze"),
-           electronicMailAddress = "dietze@bu.edu",
-           id = "https://orcid.org/0000-0002-2324-2518")
-
-coverage <- set_coverage(begin = first(date[days]), 
-               end = last(date[days]),
-               geographicDescription = "Niwot Ridge, CO, USA ",
-               west = -105.5464, east = -105.5464, 
-               north = 40.0329, south = 40.0329)
-
-dataset = eml$dataset(
-               title = "A simple carbon cycle forecast",
-               creator = me,
-               contact = list(references="https://orcid.org/0000-0002-2324-2518"),
-               pubDate = start_date,
-               intellectualRights = "",
-               abstract =  "An illustration of how we might use a particle filter to constrain a simple carbon forecast",
-               dataTable = dataTable,
-               coverage = coverage
-               )
-
-## EFI specific forecast metadata
-additionalMetadata <- eml$additionalMetadata(
-  metadata = list(
-    forecast = list(
-## Basic elements
-      timestep = paste(timestep,"seconds"), 
-      forecast_horizon = paste(days,"days"),
-      start_time = start_date,
-      iteration_id = Sys.time(),
-      project_id = "Flux Course 2022",
-      metadata_standard_version = "0.4",
-      model_description = list(
-        model_id = "SSEM",
-        name = "Super Simple Ecosystem Model",
-        type = "process-based",
-        repository = "https://github.com/ecoforecast/EFActivites"
-      ),
-## MODEL STRUCTURE & UNCERTAINTY CLASSES
-      initial_conditions = list(
-        # Possible values: absent, present, data_driven, propagates, assimilates
-        status = "assimilates",
-        # Number of parameters / dimensionality
-        complexity = 3 
-      ),
-      drivers = list(
-        status = "data_driven",
-        complexity = 2
-      ),
-      parameters = list(
-        status = "assimilates",
-        complexity = 9   
-      ),
-      random_effects = list(
-        status = "absent"
-      ),
-      process_error = list(
-        status = "assimilates",
-        propagation = list(
-          type = "ensemble", # ensemble vs analytic
-          size = ne         # required if ensemble
-        ),
-        complexity = 3,   
-        covariance = FALSE
-      ),
-      obs_error = list(
-        status = "data_driven",
-        complexity = 1,   
-        covariance = FALSE
-      )
-    ) # forecast
-  ) # metadata
-) # eml$additionalMetadata
-
-my_eml <- eml$eml(dataset = dataset,
-           additionalMetadata = additionalMetadata,
-           packageId = Sys.time() , 
-           system = "datetime"  ## system used to generate packageId
-           )
-
-## check that the EML is also a valid EFI forecast
-#EFIstandards::forecast_validator(my_eml)
-meta_file = file.path(outdir,paste0("terrestrial_30min_",start_date,"_SSEM.xml"))
-write_eml(my_eml, meta_file)
 ```
 
 
-
-# Submission
-
-example of how you would submit the forecast to the EFI NEON challenge (by default, doesn't actually run)
-```
-neon4cast::submit(forecast_file = fx_file, metadata = NULL, ask = FALSE)
-```
-
-# Run an actual forecast!
-
-* The script forecast.R runs the forecast into the future using forecast meteorology (EFI provides NOAA GEFS 35 day, 31 ensemble)
-* To set up, copy the date-stamped Analysis RDS file that you want to start off from (state and parameter initial conditons) into the `analysis` folder and change the date to the date you want to start forecasting from
-* Met variables are now matrices of ensemble members that need to be sampled over!
-* Every day we predict 35 days into the future, so we end up forecasting every date 35 times (with different lead times) rather than just once as we did above.
-* Because of the latency in the NEON data we alse end up "reforecasting" the past few days to catch and assimilate any new observations that may have shown up since our last forecast
-
-
-# Workflow automation
-
-The first part of this file (on: workflow dispatch) used cron to schedule the workflow. The forecast in this repository is designed to run daily at 20:00 UTC.  The execution of the forecast occurs on GitHub's servers, so your local computer does not need to be turned on.  In ".github/workflow/do_prediction.yml", the lines `-cron: "* 20 * *"` define the time that the forecast is run.  In this case it is run each day at 20:00:00 UTC (note all GitHub timings are on UTC).  You can update this to run on a different schedule based on timing codes found in https://crontab.guru
-
-The second part of this file (jobs) is used to grab a copy of a Docker container image, eco4cast/rocker-neon4cast, that has R and a large number of R packages pre-installed, including the NEON forecast challenge packages.
-
-The final part of this file (run) tells Github Actions what Rscript it should run
-
-* Automate to run every day!
-See https://github.com/eco4cast/neon4cast-example for example. To do so you'd want to save the calibration we've done here and set up an R script that just runs the Forecast Analysis cycle for a specific start date.
-
-A video providing more information about how to use GitHub actions for automated forecast generation can be found here: https://youtu.be/dMrUlXi4_Bo
 
 # Next steps
 
 * Additional sites: EFI provides met and targets for all 47 NEON tower sites. Extending beyond these is possible but required nontrivial time spent on data processing.
-* Additional data constraints to the Particle Filter's Likelihood: Things that work particularly well are sensor-based observations that become available frequently (e.g., MODIS LAI, SMAP, soil respiration)
+* Additional data constraints to the Likelihood: Things that work particularly well are sensor-based observations that become available frequently (e.g., MODIS LAI, SMAP, soil respiration)
 * Modify/improve the model: Lots of assumptions in SSEM are known to be false!
 * Longer calibration (do parameters vary by season? by year?)
 
