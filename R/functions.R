@@ -26,9 +26,9 @@ SSEM.orig <- function(X, params, inputs, timestep = 1800){
   mortality = X[, 2] * params$mortality
   
   ## update states
-  X1 = pmax(rnorm(ne, X[, 1] + alloc[, 3] * k - litterfall, params$sigma.leaf), 0)
-  X2 = pmax(rnorm(ne, X[, 2] + alloc[, 2] * k - mortality, params$sigma.stem), 0)
-  X3 = pmax(rnorm(ne, X[, 3] + litterfall + mortality - Rh * k, params$sigma.soil), 0)
+  X1 = pmax(X[, 1] + alloc[, 3] * k - litterfall, 0)
+  X2 = pmax(X[, 2] + alloc[, 2] * k - mortality, 0)
+  X3 = pmax( X[, 3] + litterfall + mortality - Rh * k, 0)
   
   return(cbind(X1 = X1, X2 = X2, X3 = X3,
                LAI = X1 * params$SLA * 0.1, 
@@ -59,11 +59,60 @@ ensemble_forecast <- function(X,params,inputs,verbose=FALSE){
   for(t in 1:nt){
     output[t, , ] <- SSEM(X, params, as.data.frame(inputs[t, , ]))  ## run model, save output
     X <- output[t, , 1:3]                          ## set most recent prediction to be the next IC
-    if((t %% 1440) == 0) print(t)             ## counter: elapsed time (30*48 = approx 1 month)
+    if((t %% 1440) == 0 && verbose) print(t)             ## counter: elapsed time (30*48 = approx 1 month)
   }
   output[is.nan(output)] = 0
   output[is.infinite(output)] = 0
   return(output) 
+}
+
+######  SENSITIVITY ANALYSIS ####
+
+##` @params ns    number of steps along each dimension in the sensitivity analysis
+nee.sensitivity = function(ns){
+  ne = ns
+  sa.summary = array(NA,c(ncol(params),ns,5)) 
+  
+  ## calculate the median parameter vector and range
+  theta_ci = apply(params, 2, quantile, c(0,0.5,1)) 
+  Xbar     = matrix(apply(X.orig,2,mean),nrow=ns,ncol=3,byrow=TRUE)
+  
+  for(i in seq_len(ncol(params))){
+    print(i)
+    sa.stats = as.data.frame(matrix(NA,nrow=ns,ncol=5))
+    colnames(sa.stats) =c("param","mean","RMSE","Bias","cor")
+    theta_sa = as.data.frame(matrix(theta_ci[2,],nrow=ns,ncol=ncol(theta_ci),byrow = TRUE)) ## matrix of defaults
+    colnames(theta_sa) = colnames(params)
+    theta_sa[,i] = quantile(params[,i],seq(0,1,length=ns))                   ## Vary one parameter
+    sa.ensemble = ensemble_forecast(X = Xbar,
+                                    params = theta_sa,
+                                    inputs = inputs[,2:3]) 
+    sa.nee = sa.ensemble[,,6]
+    sa.stats[,"param"] = theta_sa[,i]
+    sa.stats[,"mean"] = apply(sa.nee,2,mean)
+    sa.stats[,"RMSE"] = apply(sa.nee[qaqc,],2,function(E){sqrt(mean((E-O)^2))})
+    sa.stats[,"Bias"] = apply(sa.nee[qaqc,],2,function(E){mean(E-O)})
+    sa.stats[,"cor"] = apply(sa.nee[qaqc,],2,function(E){cor(E,O)})
+    sa.summary[i,,] = as.matrix(sa.stats)
+  }
+  return(sa.summary)
+}
+
+sens_plot = function(var,line=TRUE){
+  par(mfrow=c(3,3))
+  sens = rep(NA,9)
+  for(i in seq_len(nrow(sa.summary))){
+    plot(sa.summary[i,,1],sa.summary[i,,var],
+         main=colnames(params)[i],ylab=vname[var],
+         type="b")
+    if(line){
+      m = lm(sa.summary[i,,var]~sa.summary[i,,1])
+      abline(m,col=2)
+      sens[i]=coef(m)[2]*mean(params[,i])/mean(E) ## elasticity = (dy/ybar) / (dx/xbar)
+    }
+  }
+  names(sens)=colnames(params)
+  return(sens)
 }
 
 ######   VISUALIZATION  #########
@@ -111,7 +160,7 @@ plot_forecast <- function(out,sample=FALSE){
   if(sample){
     samp = sample.int(dim(out)[2],sample)
   } 
-  for(i in 1:12){  ## loop over variables
+  for(i in 1:9){  ## loop over variables
     ci = apply(out[, , i], 1, quantile, c(0.025, 0.5, 0.975))   ## calculate CI over ensemble members
     plot(ci[2, ], main = varnames[i], 
          xlab = "time", ylab = units[i], type='l',ylim  =range(ci))

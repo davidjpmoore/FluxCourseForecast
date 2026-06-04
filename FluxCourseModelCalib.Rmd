@@ -29,8 +29,8 @@ outdir = "./" ## output directory for saving files
 Let's begin by defining our model itself, as well as a number of ancillary 
 functions that will be useful in simulation and analysis. The model below is 
 very simple but is complex enough to have some chance at capturing observed 
-variability. In addition, unlike most ecosystem models, it explicitly contains 
-process error. FYI the code for this model lives in R/functions.R.
+variability. FYI the code for this model, and most of the custom functions below, 
+live in R/functions.R.
 
 ```{r}
 SSEM.orig
@@ -47,8 +47,7 @@ estimate LAI from Leaf Biomass and specific leaf area (SLA). Using LAI and light
 using a simple light use efficiency approach. GPP is then allocated to 
 autotrophic respiration (Ra), leaf NPP, and woody NPP based on fixed allocation fractions. These leaf and wood 
 biomass pools can then turns over into SOM as litterfall and Coarse Woody Debris / mortality assuming fixed turnover rates. 
-SOM is then lost via heterotrophic respiration, which is assumed to be proportional to the size of the SOM pool and to follow a standard Q10 temperature 
-sensitivity. Finally, Normal process error is added to all columns in X to account for model inadequacy. 
+SOM is then lost via heterotrophic respiration, which is assumed to be proportional to the size of the SOM pool and to follow a standard Q10 temperature sensitivity.  
 
 
 
@@ -149,12 +148,6 @@ Neff = matrix(rpois(ne, 100), ne)
 rdirichlet <- cmpfun(rdirichlet.orig)         ## byte compile to speed up
 ## prior on fractional allocation to [Ra, wood, leaf] (each draw must sum to 1)
 params$falloc = rdirichlet(ne,Neff%*%alloc) 
-
-## Process error: expert opinion
-## convert gamma priors on precision into standard deviations
-params$sigma.leaf = 1 / sqrt(rgamma(ne, 10, 10 * 0.01 ^ 2)) ## leaf biomass
-params$sigma.stem = 1 / sqrt(rgamma(ne, 10, 10 * 0.01 ^ 2)) ## wood biomass
-params$sigma.soil = 1 / sqrt(rgamma(ne, 10, 10 * 0.01 ^ 2)) ## soil carbon
 
 ## Specific leaf area
 params$SLA = rnorm(ne, mean(SLA), sd(SLA)) 
@@ -275,10 +268,97 @@ If you liked model assessment, you might also like...
 
 * Model selection (AIC, DIC, wAIC, Predictive Loss)
 * Model averaging
-* Quantile-based model diagnostics & Continuous Rank Probability Score (CRPS)
 
 # Quantitative skill scores
 
+In additionally to visually assessing model performance it 
+
+
+```{r}
+## apply QAQC
+qaqc = (nep.qc == 0)
+E = ci[2,qaqc]           ## model = expected
+O = nep[qaqc] ## observed
+
+## Model vs obs regressions
+NEE.pre.fit = lm(O ~ E)
+
+## performance stats
+stats = as.data.frame(matrix(NA,2,4))
+colnames(stats) <- c("RMSE","Bias","cor","slope")
+rownames(stats) <- c("pre","post")
+stats["pre","RMSE"] = sqrt(mean((E-O)^2))
+stats["pre",'Bias'] = mean(E-O)
+stats["pre",'cor']  = cor(E,O)
+stats["pre",'slope'] = coef(NEE.pre.fit)[2]
+stats["pre","R-squared"]=summary(NEE.pre.fit)$r.squared
+knitr::kable(stats)
+
+## predicted-observed
+plot(E,O,pch=".",xlab="model",ylab='observed',main='NEE (umol/m2/sec)')
+abline(0,1,col=2,lwd=2)
+abline(NEE.pre.fit,col=3,lwd=3,lty=2)
+legend("bottomright",legend=c('obs','1:1','reg'),col=1:3,lwd=3)
+```
+
+If you liked model skill scores, you might also like...
+
+* Taylor Diagrams
+* Quantile-based model diagnostics, Continuous Rank Probability Score (CRPS), and log score; see [Validation lab](https://github.com/EcoForecast/EF_Activities/blob/d92d8a44ee9d654ccbee569d9be3674821402a5c/Exercise_11_ModelAssessment.Rmd#L105)
+
+# Sensitivity
+
+```{r}
+sa.summary = nee.sensitivity(ns=10)
+## output is an array organized by parameter name, parameter samples, and variable
+## variables are in the following order: 
+vname = c("param","mean","RMSE","Bias","cor")
+
+## plot sensitivities and calc linear approx
+sens = sens_plot(var=2)
+
+## ranked table of elasticities (i.e., standardized sensitivities)
+knitr::kable(sens[order(abs(sens),decreasing = TRUE)]) 
+```
+
+# Cost Functions & Likelihoods
+
+```{r}
+sens_plot(var=3,line=FALSE) ## RMSE (minimize)
+sens_plot(var=4,line=FALSE) ## bias (want as close as possible to 0)
+sens_plot(var=5,line=FALSE) ## correlation (maximize)
+```
+
+```{r}
+theta_bar = data.frame(t(apply(params, 2, mean)))
+theta_bar$sigma = stats["pre","RMSE"]
+theta_range = apply(params, 2, range) 
+Xbar      = apply(X.orig,2,mean)
+
+likelihood <- function(param,Obs){
+  param = t(data.frame(param))
+  print(param)
+  class(param)
+  Model = ensemble_forecast(X = Xbar,
+                            params = param[,1:9],
+                            inputs = inputs[,2:3]) 
+  lnL = -sum(dnorm(Obs,Model[qaqc],param[1,10],log=TRUE))
+  return(lnL)
+}
+
+#lnL at the current parameter mean values
+L0 = likelihood(param=t(theta_bar),Obs=O)
+
+```
+
+
+```{r}
+system.time({
+  fit = optim(theta_bar,likelihood,method="L-BFGS-B",
+              lower=theta_range[1,],upper=theta_range[2,],
+              hessian=TRUE,Obs=O)
+})
+```
 
 
 # Analysis Step: Particle Filter
