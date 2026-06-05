@@ -180,16 +180,18 @@ QC flags documented in the R Markdown narrative, not in a separate log file.
 
 | Item | Status | Tracked in |
 |---|---|---|
-| exercises/01_run_model.Rmd | Complete | commit history |
-| exercises/02_validation.Rmd | Complete | commit history |
+| exercises/01_run_model.Rmd | Complete, section numbering fixed | commit history |
+| exercises/02_validation.Rmd | Complete, section numbering fixed | commit history |
 | exercises/03_handoff.Rmd | Complete | commit history |
 | CMIP6 extraction script | Complete | commit history |
 | Path refactor (data_dir variable) | Complete | commit history |
-| Student data zip on Google Drive | Complete | Google Drive |
+| Student data zip on Google Drive | Complete, rebuilt with US-NR1 | Google Drive |
 | fluxnet package HR bug | Fixed upstream in v0.3.2.9000 by Eric Scott | EcosystemEcologyLab/fluxnet-package |
 | ensemble_forecast() timestep hardcoded at 1800s | Fix drafted, pending Mike Dietze approval | email thread |
 | CESM2 uses SSP370 not SSP245 in CMIP6 data | Documented in CSV, note needed in exercise Rmd | data/cmip6/ |
 | UKESM1-0-LL historical only through 2014 | Documented in CSV, note needed in exercise Rmd | data/cmip6/ |
+| US-NR1 NEE_VUT_REF absent, use NEE_CUT_REF | Noted in download script, note needed in exercise Rmd | data/US-NR1/ |
+| exercises updated for US-NR1 and US-MMS as primary sites | Not started | |
 | End-to-end test against Google Drive path | Not yet run | |
 | Upstream merge with mdietze/FluxCourseForecast | Pending coordination with Mike Dietze | email thread |
 

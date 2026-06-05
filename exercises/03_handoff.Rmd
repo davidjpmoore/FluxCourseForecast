@@ -1,0 +1,746 @@
+---
+title: "Exercise 03 — AM/PM Handoff: Preparing the Calibration Workspace"
+subtitle: "Fluxcourse 2026 · Bloomington, Indiana"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: false
+    theme: flatly
+---
+
+```{r metadata, echo=TRUE}
+# Reproducibility header — records when this document was knitted, the git
+# commit it came from, and the full R session environment.
+cat("Date:", format(Sys.time(), "%Y-%m-%d %H:%M"), "\n")
+cat("Commit:", system("git rev-parse --short HEAD", intern = TRUE), "\n")
+sessionInfo()
+```
+
+---
+
+## Introduction
+
+You have just finished the morning session. You ran the Super Simple Ecosystem
+Model (SSEM) at DE-Tha and compared its output against eddy covariance
+observations, FLUXCOM, and CMIP6 data. The afternoon session with Mike Dietze
+will take the next step: using the particle filter to systematically adjust
+SSEM's parameters so they are consistent with what the tower observed. That
+process is called **data assimilation** or **calibration**.
+
+This document bridges the two sessions. It prepares a single workspace file —
+`exercises/output/handoff_workspace.RDS` — that Mike's afternoon code will load
+directly. The file contains:
+
+- The meteorological drivers for US-MMS year 2005 in the exact format SSEM
+  expects (`inputs`)
+- The prior parameter ensemble and initial conditions (`params`, `X.orig`)
+- The prior SSEM ensemble forecast from those parameters (`output.ensemble`)
+- The eddy covariance observations the particle filter will assimilate (`flux`,
+  `nep`, `nep.qc`, `qaqc`)
+
+**Why US-MMS?** The afternoon session uses US-MMS (Morgan Monroe State Forest,
+Indiana) rather than DE-Tha. US-MMS is a mixed deciduous broadleaf forest
+(DBF); its strong seasonal phenology — near-zero GPP in winter, rapid spring
+green-up, peak summer uptake — provides a demanding test of whether the particle
+filter can improve on the prior. The site is also where the particle filter
+framework was originally developed and tested.
+
+**Your only task right now is to run this document.** There are no questions to
+answer and no analysis to interpret. When the checklist at the bottom prints
+without errors, raise your hand and let the instructor know. The afternoon
+session will start from there.
+
+---
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+# ── Libraries ──────────────────────────────────────────────────────────────────
+library(tidyverse)   # dplyr, ggplot2, readr, tidyr, lubridate wrapper
+library(lubridate)   # POSIXct parsing, year(), hour()
+
+# ── Paths ──────────────────────────────────────────────────────────────────────
+# data_dir is the single path you need to change if your data are on Google
+# Drive or another external location rather than inside the local repository.
+#
+# Default: the data/ directory inside this repository clone. This works if
+# you ran the download scripts (data/US-MMS/download_usmms.R and
+# data/US-MMS/extract_hr_workaround.R) before coming to this session.
+#
+# If your data are on Google Drive, replace the path below, for example:
+#   data_dir <- "/Volumes/GoogleDrive/My Drive/FluxCourse2026/data"
+# Example for Google Drive on Mac:
+# data_dir <- "~/Google Drive/My Drive/Fluxcourse/.../Tuesday_AM_SSEM_part1"
+data_dir <- "../data"  # default for codespace
+
+# code_dir points to the R/ folder containing functions.R and utils.R.
+code_dir <- "../R"
+
+# ── Model code ─────────────────────────────────────────────────────────────────
+# R/functions.R provides SSEM(), ensemble_forecast(), ParticleFilter(), and the
+# helper functions used throughout the exercises.
+source(file.path(code_dir, "functions.R"))
+source(file.path(code_dir, "utils.R"))
+
+# ── Run year and site ──────────────────────────────────────────────────────────
+# We use calendar year 2005 at US-MMS. This is a non-leap year (365 days ×
+# 24 hourly timesteps = 8,760 rows), which makes the expected row count easy
+# to verify. The year 2005 has good data coverage at this site and was used in
+# the instructor review figures for this course.
+run_year  <- 2005L
+site_name <- "US-MMS"
+```
+
+---
+
+## Load US-MMS observations
+
+```{r load_obs, message=FALSE}
+# ── Path to the US-MMS hourly data file ───────────────────────────────────────
+# The US-MMS FLUXNET product uses the AmeriFlux v1.3_r1 naming convention with
+# "_HR_" for the half-hourly (actually hourly) product — different from the
+# legacy FLUXNET "_HH_" convention used at DE-Tha and DK-Sor.  See the note in
+# data/US-MMS/extract_hr_workaround.R for the full explanation of this
+# naming difference and why flux_extract() v0.3.1 silently misses these files.
+hr_file <- file.path(data_dir, "US-MMS", "US-MMS_HR.csv")
+
+if (!file.exists(hr_file)) {
+  stop(
+    "US-MMS hourly data not found at: ", hr_file, "\n\n",
+    "Run the following scripts from the repository root to download and\n",
+    "extract the data before knitting this document:\n",
+    "  Rscript data/US-MMS/download_usmms.R\n",
+    "  Rscript data/US-MMS/extract_hr_workaround.R\n"
+  )
+}
+
+# ── Load selected columns only ─────────────────────────────────────────────────
+# The full US-MMS HR file is ~280 MB on disk.  col_select loads only the seven
+# columns this document needs, keeping memory use well under 50 MB.
+#
+# any_of() is used instead of all_of() so that the load succeeds even if
+# NEE_VUT_REF_JOINTUNC is absent in this product version. We check for its
+# presence after loading and create an NA column if it is missing (see below).
+#
+# Column glossary:
+#   TIMESTAMP_START    — integer YYYYMMDDHHMM, start of each hourly window
+#   SW_IN_F            — gap-filled incoming shortwave radiation (W m⁻²)
+#   TA_F               — gap-filled air temperature (°C)
+#   NEE_VUT_REF        — net ecosystem exchange, variable-u* threshold method
+#                        (μmol CO₂ m⁻² s⁻¹; positive = atmosphere source)
+#   NEE_VUT_REF_QC     — quality flag: 0 = measured, 1–3 = increasing gap-fill
+#   NEE_VUT_REF_JOINTUNC — combined random+systematic uncertainty on NEE
+#                          (μmol CO₂ m⁻² s⁻¹); may not exist in all product
+#                          versions — checked below
+message("Loading: ", basename(hr_file))
+raw_full <- read_csv(
+  hr_file,
+  show_col_types = FALSE,
+  col_select = any_of(c(
+    "TIMESTAMP_START",
+    "SW_IN_F", "TA_F",
+    "NEE_VUT_REF", "NEE_VUT_REF_QC",
+    "NEE_VUT_REF_JOINTUNC"
+  ))
+)
+cat(sprintf("Loaded %s rows × %d columns\n",
+            format(nrow(raw_full), big.mark = ","), ncol(raw_full)))
+
+# ── Check for NEE_VUT_REF_JOINTUNC ────────────────────────────────────────────
+# The FLUXNET joint uncertainty column combines random measurement error with
+# systematic gap-filling uncertainty.  Mike's particle filter can use it as the
+# observation error standard deviation (sigma.nep) if available, giving a
+# data-driven error model rather than an assumed constant.
+#
+# Whether the column exists depends on the AmeriFlux product version and the
+# flags set at download time. We check and report so students know which error
+# model the afternoon session will use.
+has_jointunc <- "NEE_VUT_REF_JOINTUNC" %in% names(raw_full)
+if (has_jointunc) {
+  cat("NEE_VUT_REF_JOINTUNC found — joint uncertainty column will be included",
+      "in the workspace.\n")
+} else {
+  cat("NEE_VUT_REF_JOINTUNC NOT present in this product version.\n",
+      "Creating an NA column so Mike's code does not error on a missing name.\n",
+      "The particle filter will fall back to a constant observation uncertainty.\n")
+}
+
+# ── Replace FLUXNET fill value -9999 with NA ──────────────────────────────────
+# FLUXNET uses -9999 as a universal missing-value sentinel across all numeric
+# columns. Replacing it with R's NA ensures that downstream calculations
+# (means, sums) treat these as missing rather than as valid large negatives.
+raw_full <- raw_full |>
+  mutate(across(where(is.numeric), \(x) replace(x, x == -9999, NA)))
+
+# ── Parse the timestamp ────────────────────────────────────────────────────────
+# US-MMS uses an integer timestamp in YYYYMMDDHHMM format (e.g. 200501010000
+# = midnight on 1 January 2005). as.character() converts the integer to a
+# string first, then as.POSIXct() with format = "%Y%m%d%H%M" parses it.
+# tz = "UTC" is consistent with FLUXNET standard time (no daylight savings).
+raw_full <- raw_full |>
+  mutate(
+    datetime = as.POSIXct(
+      as.character(TIMESTAMP_START),
+      format = "%Y%m%d%H%M",
+      tz = "UTC"
+    )
+  ) |>
+  filter(!is.na(datetime))  # drop any rows where parsing failed
+
+# ── Filter to the run year ─────────────────────────────────────────────────────
+# We keep only year 2005.  The full record covers 1999–2023; loading all years
+# and then filtering is slightly wasteful but gives us a clean year-extraction
+# pattern that works regardless of how the file is sorted.
+raw <- raw_full |> filter(year(datetime) == run_year)
+cat(sprintf("Rows in %d: %s (expect 8,760 for a non-leap year)\n",
+            run_year, format(nrow(raw), big.mark = ",")))
+
+# ── Fill residual gaps in the meteorological drivers ──────────────────────────
+# SW_IN_F and TA_F carry the "_F" (gap-filled) suffix, so genuine NAs are rare.
+# Any remaining NAs in PAR are set to 0 (dark, no photosynthesis) rather than
+# dropped, because dropping rows would de-synchronise the driver time series
+# from the observation time series and misalign the particle filter.
+# TA_F residual NAs are forward/back-filled from adjacent observations.
+#
+# PAR conversion: SW_IN_F is total shortwave (W m⁻²). Photosynthetically active
+# radiation (400–700 nm) occupies roughly 45% of shortwave, and 1 W m⁻² in that
+# band ≈ 4.6 μmol photons m⁻² s⁻¹. Combined: PAR ≈ SW_IN_F × 2.1.
+# pmax(0) floors at zero; sensors occasionally report tiny negative values at
+# night due to calibration drift, which are physically meaningless.
+raw <- raw |>
+  mutate(
+    PAR  = pmax(SW_IN_F * 2.1, 0),   # W m⁻² → μmol photon m⁻² s⁻¹
+    temp = TA_F
+  ) |>
+  mutate(PAR  = replace_na(PAR, 0)) |>
+  tidyr::fill(temp, .direction = "downup")
+
+# ── Trim to an exact integer number of complete days ──────────────────────────
+# ensemble_forecast() does not require this, but the daily aggregation in the
+# particle filter and in subsequent analysis uses day index vectors of the form
+# rep(1:n_days, each = steps_per_day). If the time series is not exactly
+# divisible by steps_per_day, the last partial day would be assigned to the
+# wrong day index, biasing the daily totals.
+# For 2005 (365 days × 24 steps = 8,760) no trimming is needed, but the
+# check is here defensively.
+steps_per_day <- 24L   # US-MMS is hourly → 24 rows per calendar day
+n_complete    <- (nrow(raw) %/% steps_per_day) * steps_per_day
+if (n_complete < nrow(raw)) {
+  message(sprintf("Trimming %d partial rows to reach %d complete days.",
+                  nrow(raw) - n_complete, n_complete %/% steps_per_day))
+  raw <- raw[seq_len(n_complete), ]
+}
+n_days <- nrow(raw) %/% steps_per_day
+cat(sprintf("Complete days: %d  |  Timesteps: %d  |  Steps/day: %d\n",
+            n_days, nrow(raw), steps_per_day))
+
+# ── Build the flux data frame ──────────────────────────────────────────────────
+# `flux` holds the observed carbon flux and quality information aligned to the
+# same time axis as the SSEM output.  All columns carry the original FLUXNET
+# variable names so Mike's downstream code can reference them by name.
+#
+# Column descriptions:
+#   datetime             — POSIXct timestamp for each hourly window
+#   NEE_VUT_REF          — observed NEE (μmol CO₂ m⁻² s⁻¹; + = source)
+#   NEE_VUT_REF_QC       — quality flag (0 = measured, 1–3 = gap-fill tiers)
+#   SW_IN_F              — shortwave radiation driver (W m⁻²), kept for context
+#   TA_F                 — air temperature driver (°C), kept for context
+#   NEE_VUT_REF_JOINTUNC — combined uncertainty on NEE; NA column if not in file
+flux <- tibble(
+  datetime             = raw$datetime,
+  NEE_VUT_REF          = raw$NEE_VUT_REF,
+  NEE_VUT_REF_QC       = raw$NEE_VUT_REF_QC,
+  SW_IN_F              = raw$SW_IN_F,
+  TA_F                 = raw$TA_F,
+  NEE_VUT_REF_JOINTUNC = if (has_jointunc) raw$NEE_VUT_REF_JOINTUNC
+                         else              rep(NA_real_, nrow(raw))
+)
+
+cat(sprintf("flux: %d rows × %d columns\n",
+            nrow(flux), ncol(flux)))
+cat("  columns:", paste(names(flux), collapse = ", "), "\n")
+cat(sprintf("  measured timesteps (QC=0): %d  |  missing NEE: %d\n",
+            sum(flux$NEE_VUT_REF_QC == 0, na.rm = TRUE),
+            sum(is.na(flux$NEE_VUT_REF))))
+
+# ── Build the inputs data frame ────────────────────────────────────────────────
+# `inputs` packages the meteorological drivers for the SSEM run.
+#
+# Three columns:
+#   date — POSIXct timestamp aligned to the hourly FLUXNET windows; Mike's
+#          downstream code uses this to join model output with observations.
+#   temp — air temperature (°C), from TA_F after gap-filling.
+#   PAR  — photosynthetically active radiation (μmol photon m⁻² s⁻¹), from SW_IN_F.
+#
+# IMPORTANT — ensemble_forecast() call convention:
+#   The ensemble_forecast() function in R/functions.R internally constructs a
+#   [nt × ne × 2] array and copies `as.matrix(inputs)` into it row by row.
+#   The dimension-2 extent is hardcoded to 2, so ensemble_forecast() must be
+#   called with a 2-column data frame — passing all three columns here would
+#   cause a dimension mismatch error.
+#   → When calling ensemble_forecast() below, we pass inputs[, c("PAR", "temp")].
+#   The full 3-column `inputs` object is saved in the workspace for Mike's
+#   downstream code, which needs the `date` column for time alignment.
+inputs <- tibble(
+  date = raw$datetime,
+  temp = raw$temp,
+  PAR  = raw$PAR
+)
+
+cat(sprintf("inputs: %d rows × %d columns  (date, temp, PAR)\n",
+            nrow(inputs), ncol(inputs)))
+```
+
+---
+
+## Prior ensemble setup
+
+```{r model_setup}
+# ── Ensemble size ──────────────────────────────────────────────────────────────
+# ensemble_forecast() reads `ne` from the global R environment — it must be
+# set before calling the function.  100 members is sufficient for the particle
+# filter exercise; it runs in 1–2 minutes for 8,760 hourly timesteps.
+ne <- 100L
+
+# ── Timestep ───────────────────────────────────────────────────────────────────
+# US-MMS uses hourly observations → timestep = 3600 seconds.
+# Note that DE-Tha (Exercise 01) used 1800 s (half-hourly); using the wrong
+# value in unit conversions from instantaneous rates to daily totals produces
+# a factor-of-two error.
+#
+# CAVEAT: ensemble_forecast() calls SSEM() without forwarding a timestep
+# argument, so SSEM's internal unit conversion (k = ... × timestep) always
+# uses SSEM's default of 1800 s regardless of site.  For the prior ensemble
+# run here this is acceptable because the parameters are not yet calibrated
+# and the particle filter will compensate via parameter adjustment.  The
+# `timestep` variable below is stored in the workspace so Mike's afternoon
+# code can use it for correct daily-total conversions.
+timestep <- 3600L   # seconds per hourly US-MMS timestep
+
+# ── Random seed ────────────────────────────────────────────────────────────────
+# Fix the seed before any stochastic call so the workspace is reproducible.
+# Using the same seed as Exercises 01 and 02 (2026) keeps the ensemble
+# realisations consistent across all three documents.
+set.seed(2026L)
+
+# ── Initial conditions (X.orig) ───────────────────────────────────────────────
+# SSEM tracks three carbon pools in Mg C ha⁻¹:
+#   column 1 — Bleaf: leaf carbon
+#   column 2 — Bwood: wood (stem + coarse root) carbon
+#   column 3 — BSOM:  soil organic carbon
+#
+# Every row is one ensemble member; all start from the same point because our
+# prior uncertainty is expressed entirely through the parameter distributions
+# below.  These values represent typical conditions for a mature mixed
+# deciduous broadleaf (DBF) forest in Indiana.
+#
+# Named X.orig to distinguish the prior initial conditions from the updated
+# state X that the particle filter produces after assimilating observations.
+X.orig <- matrix(NA_real_, nrow = ne, ncol = 3)
+# Bleaf: leaf carbon for a deciduous forest at the start of the growing season.
+# Mixed deciduous forests in Indiana: ~1–4 Mg C ha⁻¹ of leaf biomass.
+# Using 3.0 (same as DE-Tha) to keep the exercises comparable, though a
+# deciduous forest rebuilds its canopy each spring from near zero.
+X.orig[, 1] <- 3.0
+# Bwood: wood + coarse root carbon. US-MMS is an old-growth/managed stand
+# with high wood density; 100 Mg C ha⁻¹ is reasonable for mature oak-maple.
+X.orig[, 2] <- 100.0
+# BSOM: soil organic carbon to ~1 m. Deciduous forests accumulate thick O
+# horizons; 100 Mg C ha⁻¹ is consistent with NRCS soil survey data for
+# mixed hardwood stands in southern Indiana.
+X.orig[, 3] <- 100.0
+
+# ── Parameter prior ensemble ───────────────────────────────────────────────────
+# We draw ne realisations of each parameter from distributions that represent
+# our prior uncertainty about US-MMS specifically.  These are DBF-appropriate
+# values following the vegetation-type parameterisation in
+# exercises/generate_review_figures.R.  The particle filter will update them
+# against the observed NEE in the afternoon session.
+
+# steps_per_yr: used to express annual turnover rates as per-timestep fractions.
+# Using 365 days (ignoring leap years) gives a stable reference denominator;
+# the actual run year (2005) also has 365 days, so there is no discrepancy here.
+steps_per_yr <- 365L * 24L   # 8,760 hourly steps in a non-leap year
+
+# Deciduous broadleaf forest leaf phenology:
+#   Leaves turn over completely each year (~100% annual turnover).
+#   lf_annual = 1.0 yr⁻¹ → per-step rate = 1.0 / 8760 ≈ 1.14 × 10⁻⁴
+#   In contrast, Norway spruce at DE-Tha has ~4-year needle longevity:
+#   lf_annual = 0.25 yr⁻¹ → per-step rate ≈ 2.85 × 10⁻⁵ (at 30-min)
+#   The 4× higher litterfall rate here reflects that deciduous trees rebuild
+#   their full canopy from scratch every spring.
+lf_annual <- 1.0    # yr⁻¹  (100% annual leaf turnover for a deciduous forest)
+
+# Wood mortality (woody biomass to SOM):
+#   ~80-year rotation / natural senescence → ~1.25% of Bwood per year.
+#   This is the same rate used at DE-Tha; woody turnover rates are less
+#   vegetation-type-dependent than leaf turnover rates.
+mort_annual <- 0.0125   # yr⁻¹
+
+# Carbon allocation fractions for a DBF (Dirichlet concentration parameters):
+#   falloc.1 → Ra   (autotrophic respiration):  4 / 10 = 40% expected
+#   falloc.2 → NPPwood (wood growth):           3 / 10 = 30% expected
+#   falloc.3 → NPPleaf (leaf growth):           3 / 10 = 30% expected
+#
+# Compared with the ENF (Norway spruce) parameterisation in Exercise 01:
+#   ENF: c(5, 3, 2) → Ra 50% | NPPwood 30% | NPPleaf 20%
+#   DBF: c(4, 3, 3) → Ra 40% | NPPwood 30% | NPPleaf 30%
+# The higher leaf allocation for DBF (30% vs 20%) reflects the energetic cost
+# of rebuilding the full canopy from scratch each spring. The lower Ra fraction
+# (40% vs 50%) is consistent with the higher observed CUE (carbon use
+# efficiency = NPP/GPP ≈ 0.55–0.60) in deciduous forests.
+falloc_alpha <- c(4, 3, 3)
+
+params <- data.frame(
+
+  # alpha: canopy light use efficiency (μmol CO₂ per μmol photon absorbed)
+  # GPP = α × Beer's law extinction × PAR
+  # Temperate deciduous forest literature: 0.015–0.030 μmol μmol⁻¹.
+  # Using the same prior mean as DE-Tha (0.02) because the growing-season
+  # canopy LUE of deciduous and evergreen temperate forests is broadly similar.
+  alpha = rnorm(ne, mean = 0.02, sd = 0.003) |> pmax(0),
+
+  # SLA: specific leaf area (m² leaf per kg leaf dry mass)
+  # LAI = Bleaf × SLA × 0.1 (the 0.1 converts Mg ha⁻¹ to kg m⁻²).
+  # Deciduous broadleaf trees generally have higher SLA than conifers:
+  # oak / maple / tulip poplar typical range: 12–25 m² kg⁻¹.
+  # Using 8.0 as the prior mean to match the rest of the exercise set;
+  # the particle filter will adjust if the data support a different value.
+  SLA = rnorm(ne, mean = 8.0, sd = 1.2) |> pmax(1),
+
+  # Rbasal: basal heterotrophic respiration rate
+  # Rh = Rbasal × BSOM × Q10^(temp / 10)
+  # Units: μmol CO₂ m⁻² s⁻¹ per Mg C ha⁻¹ BSOM.
+  # Indiana forest soils are warmer on average than Germany (site MAT ~11°C vs
+  # ~8°C at DE-Tha), but we keep the same prior mean as a neutral starting
+  # point; the particle filter will update Rbasal toward the data.
+  Rbasal = rnorm(ne, mean = 0.015, sd = 0.003) |> pmax(0),
+
+  # Q10: temperature sensitivity of heterotrophic respiration (dimensionless)
+  # Each 10°C increase in temperature multiplies Rh by Q10.
+  # Canonical value 2.0; typical range 1.4–2.5 from meta-analyses.
+  Q10 = rnorm(ne, mean = 2.0, sd = 0.3) |> pmax(1),
+
+  # litterfall: fraction of Bleaf transferred to BSOM per hourly timestep
+  # = lf_annual / steps_per_yr = 1.0 / 8760 ≈ 1.14 × 10⁻⁴ per step
+  # SD = 10% of mean, drawn positively (pmax prevents negative rates)
+  litterfall = rnorm(
+    ne,
+    mean = lf_annual / steps_per_yr,
+    sd   = lf_annual * 0.1 / steps_per_yr
+  ) |> pmax(0),
+
+  # mortality: fraction of Bwood transferred to BSOM per hourly timestep
+  # = mort_annual / steps_per_yr = 0.0125 / 8760 ≈ 1.43 × 10⁻⁶ per step
+  mortality = rnorm(
+    ne,
+    mean = mort_annual / steps_per_yr,
+    sd   = mort_annual * 0.1 / steps_per_yr
+  ) |> pmax(0),
+
+  # sigma.leaf / sigma.stem / sigma.soil: process noise standard deviations
+  # Gaussian noise added to each pool at every timestep; represents cumulative
+  # model structural error. Values are the same as in Exercise 01 because we
+  # have no site-specific prior for US-MMS.
+  sigma.leaf = rep(0.01, ne),
+  sigma.stem = rep(0.10, ne),
+  sigma.soil = rep(0.10, ne)
+)
+
+# Draw carbon allocation fractions from the Dirichlet distribution.
+# rdirichlet.orig() (from R/functions.R) ensures fractions sum to exactly 1.0
+# for every ensemble member, which is a hard constraint of the SSEM equations.
+falloc <- rdirichlet.orig(ne, alpha = falloc_alpha)
+params$falloc.1 <- falloc[, 1]   # fraction of GPP → autotrophic respiration
+params$falloc.2 <- falloc[, 2]   # fraction of GPP → wood NPP
+params$falloc.3 <- falloc[, 3]   # fraction of GPP → leaf NPP
+
+# Verify the allocation constraint for every member.
+stopifnot(
+  all(abs(rowSums(params[, c("falloc.1", "falloc.2", "falloc.3")]) - 1) < 1e-10)
+)
+
+cat(sprintf("params: %d ensemble members × %d parameters\n",
+            nrow(params), ncol(params)))
+cat(sprintf("X.orig: %d ensemble members × %d pools (Bleaf, Bwood, BSOM)\n",
+            nrow(X.orig), ncol(X.orig)))
+```
+
+---
+
+## Run the prior ensemble
+
+```{r model_run, cache=TRUE}
+# ── Why run the prior ensemble here? ──────────────────────────────────────────
+# The particle filter works by comparing the SSEM forecast with observations
+# and reweighting ensemble members that match the data. To do that comparison,
+# Mike's code needs a complete SSEM forecast run BEFORE any data are seen.
+# That prior forecast is stored in output.ensemble.
+#
+# After the particle filter runs this afternoon, you will have a posterior
+# ensemble that has been updated by the observations.  The contrast between
+# the prior (output.ensemble here) and the posterior (produced in the PM
+# session) shows how much information the data contain about the parameters.
+
+# ── Call ensemble_forecast() with the 2-column driver subset ──────────────────
+# As explained in the Setup section above, ensemble_forecast() internally
+# creates a [nt × ne × 2] array and fills it with as.matrix(inputs).
+# Passing inputs with 3 columns (including 'date') would produce a dimension
+# mismatch.  We extract only the driver columns here; the full 3-column inputs
+# object (with the date column) is saved in the workspace.
+message("Starting US-MMS prior ensemble (expect ~1–2 minutes for 8,760 steps) …")
+output.ensemble <- ensemble_forecast(
+  X      = X.orig,
+  params = params,
+  inputs = as.data.frame(inputs[, c("PAR", "temp")])
+)
+
+cat(sprintf(
+  "\noutput.ensemble dimensions [timesteps × ensemble × variables]: %s\n",
+  paste(dim(output.ensemble), collapse = " × ")
+))
+cat("Variable index → name:\n")
+for (i in seq_along(varnames)) {
+  cat(sprintf("  [,,%2d]  %-12s  %s\n", i, varnames[i], units[i]))
+}
+cat("\nMike's particle filter indexes NEP as output.ensemble[,,6].\n")
+```
+
+---
+
+## Observation vectors
+
+```{r obs_vectors}
+# ── nep: net ecosystem production from the eddy covariance record ─────────────
+# FLUXNET reports NEE (net ecosystem exchange) with the atmospheric sign
+# convention: NEE > 0 means the ecosystem is a net source (releasing CO₂),
+# NEE < 0 means a net sink (absorbing CO₂).
+#
+# SSEM's output.ensemble[,,6] is NEP (net ecosystem production) with the
+# ecological sign convention: NEP > 0 means the ecosystem is a carbon SINK.
+#
+# NEP = −NEE, so we negate the flux tower NEE to produce nep on the same sign
+# convention as SSEM's output. The particle filter compares:
+#   obs:   nep  (from tower, sign-flipped here)
+#   model: output.ensemble[,,6]  (from SSEM, ecological convention)
+nep <- -flux$NEE_VUT_REF
+
+# ── nep.qc: quality flag for each observed NEP value ─────────────────────────
+# 0 = directly measured (sonic anemometer + gas analyser, no processing)
+# 1 = good gap-fill (short gaps, high-quality ERA5 meteorology available)
+# 2 = moderate gap-fill (longer gaps, or marginal meteorological data)
+# 3 = coarse gap-fill (multi-day gaps, climatological fill)
+#
+# For the particle filter, treating gap-filled values as observations would
+# overcount the information content of the data: the model and the gap-fill
+# algorithm share similar assumptions (energy balance, temperature responses),
+# so their agreement would not be independent evidence. The `qaqc` mask below
+# restricts assimilation to measured (QC=0) timesteps.
+nep.qc <- as.numeric(flux$NEE_VUT_REF_QC)
+# as.numeric() coerces integer to double regardless of how read_csv() typed
+# the column; this makes the class deterministic across product versions.
+
+# ── qaqc: logical mask for particle filter likelihood calculation ─────────────
+# TRUE at timesteps where the observed NEP is directly measured (QC = 0).
+# Mike's ParticleFilter() uses this internally via na.rm = TRUE on the
+# likelihood sum: the particle filter skips any timestep where the observation
+# is NA, which is equivalent to treating those timesteps as unobserved.
+# You can supply qaqc == 0 to set non-measured timesteps to NA before passing
+# to the particle filter, or pass it separately for the PF to handle.
+qaqc <- nep.qc == 0
+
+cat(sprintf("nep:    numeric vector, length %d  |  range: [%.2f, %.2f]  |  NA count: %d\n",
+            length(nep), min(nep, na.rm = TRUE), max(nep, na.rm = TRUE),
+            sum(is.na(nep))))
+cat(sprintf("nep.qc: integer vector, length %d  |  values: %s\n",
+            length(nep.qc),
+            paste(sort(unique(nep.qc[!is.na(nep.qc)])), collapse = ", ")))
+cat(sprintf("qaqc:   logical vector, length %d  |  TRUE (measured): %d  (%.1f%%)\n",
+            length(qaqc), sum(qaqc, na.rm = TRUE),
+            100 * mean(qaqc, na.rm = TRUE)))
+```
+
+---
+
+## Save workspace
+
+```{r save_workspace}
+# ── Create the output directory if needed ─────────────────────────────────────
+# exercises/output/ is where all exercise output files are written.
+# (The working directory when knitting an Rmd is the Rmd's own directory,
+# so "output" here resolves to exercises/output/ on disk.)
+output_dir <- "output"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+# ── Package everything into a named list and save ─────────────────────────────
+# Mike's afternoon code will load this file with:
+#   ws <- readRDS("exercises/output/handoff_workspace.RDS")
+# and then access the objects as ws$ne, ws$inputs, ws$output.ensemble, etc.
+#
+# All ten objects are included:
+#
+#   ne              integer scalar      ensemble size (100)
+#   timestep        integer scalar      seconds per timestep (3600 for US-MMS)
+#   inputs          data.frame          date, temp, PAR  [8760 × 3]
+#   X.orig          matrix              prior initial conditions  [100 × 3]
+#   params          data.frame          prior parameter ensemble  [100 × 12]
+#   output.ensemble array               SSEM prior forecast  [8760 × 100 × 12]
+#   flux            data.frame          observed NEE + QC + drivers  [8760 × 6]
+#   nep             numeric vector      −NEE_VUT_REF (ecological sign)  [8760]
+#   nep.qc          numeric vector      QC flags  [8760]
+#   qaqc            logical vector      TRUE = measured timestep  [8760]
+workspace_path <- file.path(output_dir, "handoff_workspace.RDS")
+
+saveRDS(
+  list(
+    ne              = ne,
+    timestep        = timestep,
+    inputs          = inputs,
+    X.orig          = X.orig,
+    params          = params,
+    output.ensemble = output.ensemble,
+    flux            = flux,
+    nep             = nep,
+    nep.qc          = nep.qc,
+    qaqc            = qaqc
+  ),
+  file = workspace_path
+)
+
+cat(sprintf("Workspace saved: %s  (%.1f MB)\n",
+            workspace_path,
+            file.size(workspace_path) / 1e6))
+```
+
+---
+
+## Checklist
+
+```{r checklist}
+# ── Reload the saved RDS and verify every required object ─────────────────────
+# We reload from disk (rather than checking the in-memory objects) so students
+# can confirm that the file was written correctly and that all objects survive
+# the serialise-deserialise round trip.  A corruption or incomplete save would
+# show up here as a missing name or wrong dimension.
+ws <- readRDS(file.path(output_dir, "handoff_workspace.RDS"))
+
+# ── Expected structure for each object ────────────────────────────────────────
+# n_ts: number of timesteps in the run (365 days × 24 steps = 8,760)
+n_ts <- nrow(inputs)
+
+checks <- list(
+  list(name = "ne",              expect_class = "integer",    expect_dim = "scalar 100",
+       actual_class = class(ws$ne),
+       actual_dim   = paste0("scalar ", ws$ne)),
+
+  list(name = "timestep",        expect_class = "integer",    expect_dim = "scalar 3600",
+       actual_class = class(ws$timestep),
+       actual_dim   = paste0("scalar ", ws$timestep)),
+
+  list(name = "inputs",          expect_class = "data.frame", expect_dim = paste0(n_ts, " × 3"),
+       actual_class = class(ws$inputs)[1],
+       actual_dim   = paste(dim(ws$inputs), collapse = " × ")),
+
+  list(name = "X.orig",          expect_class = "matrix",     expect_dim = paste0(ne, " × 3"),
+       actual_class = class(ws$X.orig)[1],
+       actual_dim   = paste(dim(ws$X.orig), collapse = " × ")),
+
+  list(name = "params",          expect_class = "data.frame", expect_dim = paste0(ne, " × 12"),
+       actual_class = class(ws$params)[1],
+       actual_dim   = paste(dim(ws$params), collapse = " × ")),
+
+  list(name = "output.ensemble", expect_class = "array",      expect_dim = paste0(n_ts, " × ", ne, " × 12"),
+       actual_class = class(ws$output.ensemble)[1],
+       actual_dim   = paste(dim(ws$output.ensemble), collapse = " × ")),
+
+  list(name = "flux",            expect_class = "data.frame", expect_dim = paste0(n_ts, " × 6"),
+       actual_class = class(ws$flux)[1],
+       actual_dim   = paste(dim(ws$flux), collapse = " × ")),
+
+  list(name = "nep",             expect_class = "numeric",    expect_dim = paste0("length ", n_ts),
+       actual_class = class(ws$nep),
+       actual_dim   = paste0("length ", length(ws$nep))),
+
+  list(name = "nep.qc",          expect_class = "numeric",    expect_dim = paste0("length ", n_ts),
+       actual_class = class(ws$nep.qc),
+       actual_dim   = paste0("length ", length(ws$nep.qc))),
+
+  list(name = "qaqc",            expect_class = "logical",    expect_dim = paste0("length ", n_ts),
+       actual_class = class(ws$qaqc),
+       actual_dim   = paste0("length ", length(ws$qaqc)))
+)
+
+# ── Print the checklist ────────────────────────────────────────────────────────
+cat("\n")
+cat(strrep("=", 72), "\n")
+cat("HANDOFF WORKSPACE CHECKLIST — exercises/output/handoff_workspace.RDS\n")
+cat(strrep("=", 72), "\n")
+cat(sprintf("  %-20s  %-12s  %-22s  %s\n",
+            "Object", "Class", "Dimensions", "Status"))
+cat(strrep("-", 72), "\n")
+
+all_ok <- TRUE
+for (chk in checks) {
+  obj <- ws[[chk$name]]
+  # Robust class check: tibbles inherit from data.frame; integer is numeric.
+  # Use inherits() and is.numeric() rather than exact string equality so the
+  # checklist passes regardless of whether readr reads QC flags as int or dbl.
+  class_ok <- switch(chk$expect_class,
+    "data.frame" = inherits(obj, "data.frame"),
+    "numeric"    = is.numeric(obj),
+    class(obj)[1] == chk$expect_class
+  )
+  dim_ok   <- chk$actual_dim == chk$expect_dim
+  ok       <- class_ok && dim_ok
+  if (!ok) all_ok <- FALSE
+  status <- if (ok) "[OK]" else "[FAIL]"
+  cat(sprintf("  %-20s  %-12s  %-22s  %s\n",
+              chk$name, chk$actual_class, chk$actual_dim, status))
+  if (!class_ok)
+    cat(sprintf("    expected class: %s\n", chk$expect_class))
+  if (!dim_ok)
+    cat(sprintf("    expected dim:   %s\n", chk$expect_dim))
+}
+cat(strrep("-", 72), "\n")
+
+if (all_ok) {
+  cat("All objects verified.  Workspace is ready for the PM session.\n")
+} else {
+  stop("One or more objects failed the checklist — see [FAIL] rows above.")
+}
+
+cat(strrep("=", 72), "\n")
+
+# ── Additional spot checks ─────────────────────────────────────────────────────
+# Verify that output.ensemble[,,6] (NEP) and nep have compatible lengths,
+# and that the sign convention is internally consistent (median NEP should be
+# near zero or slightly positive for a mid-growing-season average).
+cat("\nSpot checks:\n")
+
+nep_obs_mean <- mean(ws$nep[ws$qaqc], na.rm = TRUE)
+nep_mod_mean <- mean(ws$output.ensemble[ws$qaqc, , 6], na.rm = TRUE)
+cat(sprintf("  Observed NEP mean at QC=0 timesteps: %+.3f umol m-2 s-1\n",
+            nep_obs_mean))
+cat(sprintf("  Prior SSEM NEP mean at QC=0 timesteps: %+.3f umol m-2 s-1\n",
+            nep_mod_mean))
+cat(sprintf("  Dirichlet allocation constraint (max |rowSums - 1|): %.2e\n",
+            max(abs(rowSums(ws$params[, c("falloc.1","falloc.2","falloc.3")]) - 1))))
+cat(sprintf("  inputs date range: %s  to  %s\n",
+            format(min(ws$inputs$date), "%Y-%m-%d"),
+            format(max(ws$inputs$date), "%Y-%m-%d")))
+cat(sprintf("  NEE_VUT_REF_JOINTUNC: %s\n",
+            if (all(is.na(ws$flux$NEE_VUT_REF_JOINTUNC)))
+              "all NA (column created as placeholder; not in this product version)"
+            else
+              paste0("present, ", sum(!is.na(ws$flux$NEE_VUT_REF_JOINTUNC)),
+                     " non-NA values")))
+
+cat("\n")
+cat(strrep("=", 72), "\n")
+cat("  When this page appears without any [FAIL] rows, raise your hand.\n")
+cat("  The PM session will start as soon as everyone has a green checklist.\n")
+cat("  Mike's code will load the workspace with:\n")
+cat("    ws <- readRDS('exercises/output/handoff_workspace.RDS')\n")
+cat(strrep("=", 72), "\n")
+```
