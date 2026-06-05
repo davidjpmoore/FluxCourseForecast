@@ -54,7 +54,7 @@ frequently cannot.
 > chunk and re-knit):
 >
 > ```r
-> saveRDS(output, "../data/ssem_detha_2000.rds")
+> saveRDS(output, file.path(data_dir, "ssem_detha_2000.rds"))
 > ```
 >
 > Once that file exists on disk, this document is self-contained.
@@ -63,17 +63,26 @@ frequently cannot.
 library(tidyverse)   # dplyr, ggplot2, readr, tidyr, purrr, lubridate wrapper
 library(lubridate)   # date arithmetic, ymd(), days_in_month()
 
+# ── Paths ─────────────────────────────────────────────────────────────────────
+# Set this to your local data folder path.
+# Example for Google Drive on Mac:
+# data_dir <- "~/Google Drive/My Drive/Fluxcourse/.../Tuesday_AM_SSEM_part1"
+data_dir <- "../data"  # default for codespace
+
+# code_dir points to the R/ folder containing functions.R and utils.R.
+code_dir <- "../R"
+
 # R/functions.R: SSEM model, ensemble_forecast, plot_forecast, rdirichlet.orig,
 # flux.uncertainty, varnames/units character vectors, ParticleFilter
-source("../R/functions.R")
+source(file.path(code_dir, "functions.R"))
 
 # R/utils.R: ciEnvelope, col.alpha, wtd.quantile, solar_geom, mat2mcmc.list
-source("../R/utils.R")
+source(file.path(code_dir, "utils.R"))
 
 # ── Load SSEM ensemble output from Exercise 01 ────────────────────────────────
 # ensemble_forecast() returns a 3-D array [timestep × ensemble × variable].
 # We read it from disk so this document does not need to re-run the model.
-rds_path <- "../data/ssem_detha_2000.rds"
+rds_path <- file.path(data_dir, "ssem_detha_2000.rds")
 if (file.exists(rds_path)) {
   ssem_output <- readRDS(rds_path)
   cat("SSEM output loaded:", paste(dim(ssem_output), collapse = " × "),
@@ -82,7 +91,7 @@ if (file.exists(rds_path)) {
   stop(paste(
     "File not found:", rds_path, "\n\n",
     "Please knit 01_run_model.Rmd first and then run:\n",
-    "  saveRDS(output, \"../data/ssem_detha_2000.rds\")\n",
+    "  saveRDS(output, file.path(data_dir, \"ssem_detha_2000.rds\"))\n",
     "in the console, then re-knit this document."
   ))
 }
@@ -148,11 +157,11 @@ site_timestep <- list(
 # col_select loads only the three columns that harmonise_subdaily() needs.
 # The HH/HR files are 695 MB / 683 MB / 284 MB on disk and expand to ~2 GB each
 # in memory when fully loaded; selecting only these columns reduces each to < 10 MB.
-detha_hh_raw <- read_csv("../data/DE-Tha/DE-Tha_HH.csv", show_col_types = FALSE,
+detha_hh_raw <- read_csv(file.path(data_dir, "DE-Tha", "DE-Tha_HH.csv"), show_col_types = FALSE,
                           col_select = c(DATETIME_START, NEE_VUT_REF, NEE_VUT_REF_QC))
-dksor_hh_raw <- read_csv("../data/DK-Sor/DK-Sor_HH.csv", show_col_types = FALSE,
+dksor_hh_raw <- read_csv(file.path(data_dir, "DK-Sor", "DK-Sor_HH.csv"), show_col_types = FALSE,
                           col_select = c(DATETIME_START, NEE_VUT_REF, NEE_VUT_REF_QC))
-usmms_hr_raw <- read_csv("../data/US-MMS/US-MMS_HR.csv",  show_col_types = FALSE,
+usmms_hr_raw <- read_csv(file.path(data_dir, "US-MMS", "US-MMS_HR.csv"),  show_col_types = FALSE,
                           col_select = c(TIMESTAMP_START, NEE_VUT_REF, NEE_VUT_REF_QC))
 
 # FLUXNET/AmeriFlux fill value: -9999 means missing (not zero). Replace with NA.
@@ -170,16 +179,16 @@ usmms_hr_raw <- replace_fluxnet_na(usmms_hr_raw)
 # the fluxnet package's flux_read() at daily resolution.  We keep loading the
 # DD file here so Chunk 6 requires no modification, and name it `usmms_raw` to
 # preserve the variable name that Chunk 6 uses.
-usmms_raw <- read_csv("../data/US-MMS/US-MMS_DD.csv", show_col_types = FALSE)
+usmms_raw <- read_csv(file.path(data_dir, "US-MMS", "US-MMS_DD.csv"), show_col_types = FALSE)
 
 # ── CMIP6 monthly output (all three models) — unchanged ──────────────────────
 # Pre-extracted from the Pangeo CMIP6 catalog at the grid cell nearest to
 # US-MMS. One row per month; units for carbon fluxes: kg C m⁻² s⁻¹.
-cesm2_raw   <- read_csv("../data/cmip6/CESM2_usmms_monthly.csv",
+cesm2_raw   <- read_csv(file.path(data_dir, "cmip6", "CESM2_usmms_monthly.csv"),
                         show_col_types = FALSE)
-ipsl_raw    <- read_csv("../data/cmip6/IPSL-CM6A-LR_usmms_monthly.csv",
+ipsl_raw    <- read_csv(file.path(data_dir, "cmip6", "IPSL-CM6A-LR_usmms_monthly.csv"),
                         show_col_types = FALSE)
-ukesm_raw   <- read_csv("../data/cmip6/UKESM1-0-LL_usmms_monthly.csv",
+ukesm_raw   <- read_csv(file.path(data_dir, "cmip6", "UKESM1-0-LL_usmms_monthly.csv"),
                         show_col_types = FALSE)
 
 # ── Discovery: print the unit and format situation ────────────────────────────
@@ -982,9 +991,9 @@ for (s in c("DK-Sor", "US-MMS")) {
 # Load the DD (daily) product for each site to get GPP and RECO as well as NEE.
 # harmonize chunk's fluxnet_daily only retained NEE, so we load DD files here.
 obs_dd_files <- list(
-  "DE-Tha" = "../data/DE-Tha/DE-Tha_DD.csv",
-  "DK-Sor" = "../data/DK-Sor/DK-Sor_DD.csv",
-  "US-MMS" = "../data/US-MMS/US-MMS_DD.csv"
+  "DE-Tha" = file.path(data_dir, "DE-Tha", "DE-Tha_DD.csv"),
+  "DK-Sor" = file.path(data_dir, "DK-Sor", "DK-Sor_DD.csv"),
+  "US-MMS" = file.path(data_dir, "US-MMS", "US-MMS_DD.csv")
 )
 for (s in names(obs_dd_files)) {
   fpath <- obs_dd_files[[s]]

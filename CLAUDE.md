@@ -91,7 +91,10 @@ confirmation before proceeding.
 
 | Variable | Purpose | Default |
 |---|---|---|
-| FLUXNET_TOKEN | Authentication for fluxnet shuttle | required |
+| AMERIFLUX_USER_NAME | AmeriFlux attribution | required |
+| AMERIFLUX_USER_EMAIL | AmeriFlux attribution | required |
+| AMERIFLUX_INTENDED_USE | AmeriFlux use category code (5 = Education) | 5 |
+| RETICULATE_PYTHON | Path to fluxnet virtualenv Python | ~/.virtualenvs/fluxnet/bin/python |
 
 ---
 
@@ -175,11 +178,20 @@ QC flags documented in the R Markdown narrative, not in a separate log file.
 
 ## Known Pending Items
 
-| Item | Tracked in |
-|---|---|
-| CMIP6 extraction script not yet written | to be completed before course |
-| 02_validation.Rmd not yet drafted | in progress |
-| Upstream merge with mdietze/FluxCourseForecast pending | coordinate with Mike Dietze |
+| Item | Status | Tracked in |
+|---|---|---|
+| exercises/01_run_model.Rmd | Complete | commit history |
+| exercises/02_validation.Rmd | Complete | commit history |
+| exercises/03_handoff.Rmd | Complete | commit history |
+| CMIP6 extraction script | Complete | commit history |
+| Path refactor (data_dir variable) | Complete | commit history |
+| Student data zip on Google Drive | Complete | Google Drive |
+| fluxnet package HR bug | Fixed upstream in v0.3.2.9000 by Eric Scott | EcosystemEcologyLab/fluxnet-package |
+| ensemble_forecast() timestep hardcoded at 1800s | Fix drafted, pending Mike Dietze approval | email thread |
+| CESM2 uses SSP370 not SSP245 in CMIP6 data | Documented in CSV, note needed in exercise Rmd | data/cmip6/ |
+| UKESM1-0-LL historical only through 2014 | Documented in CSV, note needed in exercise Rmd | data/cmip6/ |
+| End-to-end test against Google Drive path | Not yet run | |
+| Upstream merge with mdietze/FluxCourseForecast | Pending coordination with Mike Dietze | email thread |
 
 ---
 

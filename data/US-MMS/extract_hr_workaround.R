@@ -1,3 +1,8 @@
+## THIS SCRIPT IS NO LONGER NEEDED.
+## The HR extraction bug was fixed in fluxnet v0.3.2.9000 (commit 2741bb8).
+## flux_extract() now correctly handles _HR_ files in AmeriFlux FLUXNET v1.3_r1.
+## This script is retained for reference only.
+
 ## =============================================================================
 ## extract_hr_workaround.R
 ##

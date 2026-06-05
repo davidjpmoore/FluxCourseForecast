@@ -10,7 +10,7 @@
 ##
 ## Run once before the Fluxcourse exercises.
 ##
-## fluxnet package API (v0.3.1) key notes:
+## fluxnet package API (v0.3.2) key notes:
 ##   flux_download()       → download_dir = "fluxnet" default
 ##                           BUG: fails if site ZIP already exists in download_dir
 ##                           (workaround: skip call if ZIP present, see §6)
@@ -25,12 +25,11 @@
 ##                             YY: TIMESTAMP → YEAR (integer)
 ##                             MM/DD: TIMESTAMP → DATE (Date)
 ##                             WW: TIMESTAMP_START/END → DATE_START/DATE_END
-##                             HH: TIMESTAMP_START/END → DATETIME_START/DATETIME_END
+##                             HR: TIMESTAMP_START/END → DATETIME_START/DATETIME_END
 ##   flux_badm()           → reads BIF metadata; takes manifest + site_ids
 ##
 ## Product version downloaded: AMF_US-MMS_FLUXNET_1999-2023_v1.3_r1
-##   Available resolutions: DD, WW, MM, YY (FLUXMET + ERA5)
-##   HH half-hourly is NOT included in this product version.
+##   Available resolutions: HR, DD, WW, MM, YY (FLUXMET + ERA5)
 ##   ERA5 extends back to 1981 (full reanalysis period).
 ##
 ## Prerequisites
@@ -52,12 +51,12 @@ dir.create(raw_dir,   showWarnings = FALSE, recursive = TRUE)
 dir.create(unzip_dir, showWarnings = FALSE, recursive = TRUE)
 
 ## ==========================================================================
-## 1. Install / load fluxnet package (pinned to v0.3.1)
+## 1. Install / load fluxnet package (pinned to v0.3.2)
 ## ==========================================================================
 
 if (!requireNamespace("pak", quietly = TRUE)) install.packages("pak")
-message("Installing EcosystemEcologyLab/fluxnet-package @ v0.3.1 …")
-pak::pak("EcosystemEcologyLab/fluxnet-package@v0.3.1")
+message("Installing EcosystemEcologyLab/fluxnet-package @ v0.3.2 …")
+pak::pak("EcosystemEcologyLab/fluxnet-package@v0.3.2")
 
 library(fluxnet)
 library(tidyverse)
@@ -186,13 +185,12 @@ print(as.data.frame(avail))
 ##   MM  → DATE (Date, YYYY-MM-01)
 ##   WW  → DATE_START / DATE_END (Date)
 ##   DD  → DATE (Date)
-##   HH  → DATETIME_START / DATETIME_END (POSIXct)
+##   HR  → DATETIME_START / DATETIME_END (POSIXct)
 ##
 ## We read whatever resolutions the shuttle actually delivered rather than
 ## assuming any fixed set.  For US-MMS v1.3_r1 the shuttle delivers:
-##   FLUXMET: DD, WW, MM, YY  (no HH)
-##   ERA5:    DD, WW, MM, YY  (no HH)
-## HH is absent at the product level — this is not a download error.
+##   FLUXMET: HR, DD, WW, MM, YY
+##   ERA5:    HR, DD, WW, MM, YY
 ##
 ## Unit reminders (do NOT convert):
 ##   YY NEE in gC m-2 yr-1;  DD/MM/WW in gC m-2 per period
@@ -202,9 +200,9 @@ print(as.data.frame(avail))
 ##   _F_QC:     0/1/2 scale  — do NOT compare these two scales directly.
 
 ## Map flux_read resolution codes to their manifest time_resolution labels
-## flux_read uses single lowercase letters; the manifest uses doubled uppercase
-## (e.g. res_code "d" → manifest label "DD", "h" → "HH")
-RES_MAP <- c(h = "HH", d = "DD", w = "WW", m = "MM", y = "YY")
+## flux_read uses single lowercase letters; the manifest label is product-specific
+## (e.g. res_code "d" → manifest label "DD", "h" → "HR" for US-MMS v1.3_r1)
+RES_MAP <- c(h = "HR", d = "DD", w = "WW", m = "MM", y = "YY")
 
 ## Discover which resolutions are actually present for each dataset
 present_fluxmet <- unique(na.omit(
@@ -387,16 +385,15 @@ if (!is.null(yy)) {
 }
 
 ## ==========================================================================
-## 13. Daily NEE coverage by year (proxy for half-hourly; HH not available)
+## 13. Daily NEE coverage by year
 ## ==========================================================================
-## Since HH is absent from this product version, we compute daily coverage
-## from the DD file.  A year with > 80% of daily NEE_VUT_REF non-missing is
-## considered usable for particle filter validation.
+## We compute daily coverage from the DD file.  A year with > 80% of daily
+## NEE_VUT_REF non-missing is considered usable for particle filter validation.
 ##
 ## Note on QC semantics (DD FULLSET):
 ##   NEE_VUT_REF_QC = fraction of half-hours that are gap-filled (0–1).
 ##   Values close to 0 → mostly measured; close to 1 → mostly gap-filled.
-##   This is DIFFERENT from the HH QC scale (0–3 integers).
+##   This is DIFFERENT from the HR QC scale (0–3 integers).
 
 cat("\n", strrep("=", 60), "\n",
     "DAILY NEE_VUT_REF COVERAGE BY YEAR (> 80% non-missing threshold)\n",
@@ -453,12 +450,6 @@ for (pair in list(list(era5_dd, "ERA5 DD"), list(era5_mm, "ERA5 MM"))) {
 cat("\n", strrep("=", 60), "\n", "KNOWN GAPS AND QUALITY NOTES\n",
     strrep("=", 60), "\n", sep = "")
 cat("
-  - HH (half-hourly) FLUXMET file: NOT included in AMF FLUXNET v1.3_r1.
-    This is a product-level limitation, not a download error.
-    ERA5 HH is also absent (ERA5 product provides DD resolution here).
-    For SSEM model driving at sub-daily timestep, use ERA5 DD data
-    aggregated to the desired driver resolution.
-
   - ERA5 data starts 1981, pre-dating the 1999 tower installation.
     ERA5 records before 1999 are climatology with no tower constraints.
 
@@ -466,7 +457,7 @@ cat("
     primary analysis, CUT for sensitivity checks).
 
   - NEE_VUT_REF_QC at DD resolution gives the gap-filled fraction (0–1),
-    NOT the 0–3 integer scale used in HH FULLSET files.
+    NOT the 0–3 integer scale used in HR FULLSET files.
     Do not compare these two QC scales directly (see CLAUDE.md).
 ")
 

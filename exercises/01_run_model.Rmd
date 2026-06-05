@@ -63,6 +63,15 @@ library(tidyverse)
 # We use it to parse FLUXNET ISO 8601 timestamps and filter by calendar year.
 library(lubridate)
 
+# ── Paths ─────────────────────────────────────────────────────────────────────
+# Set this to your local data folder path.
+# Example for Google Drive on Mac:
+# data_dir <- "~/Google Drive/My Drive/Fluxcourse/.../Tuesday_AM_SSEM_part1"
+data_dir <- "../data"  # default for codespace
+
+# code_dir points to the R/ folder containing functions.R and utils.R.
+code_dir <- "../R"
+
 # ── Source the model code ─────────────────────────────────────────────────────
 # R/functions.R contains the full SSEM implementation:
 #   SSEM()              — core model: one 30-minute carbon cycle step
@@ -76,7 +85,7 @@ library(lubridate)
 #   beta.match()        — Beta distribution moment matching for turnover priors
 #   flux.uncertainty()  — heteroskedastic flux error model (Exercise 02)
 #   varnames, units     — character vectors naming the 12 model output variables
-source("../R/functions.R")
+source(file.path(code_dir, "functions.R"))
 
 # R/utils.R contains lower-level helper functions:
 #   ciEnvelope()    — draws a shaded credible interval polygon on a base R plot
@@ -84,7 +93,7 @@ source("../R/functions.R")
 #   wtd.quantile()  — quantile function that respects particle filter weights
 #   solar_geom()    — computes potential top-of-atmosphere shortwave radiation
 #   mat2mcmc.list() — converts parameter matrices to CODA mcmc.list objects
-source("../R/utils.R")
+source(file.path(code_dir, "utils.R"))
 ```
 
 ---
@@ -100,7 +109,7 @@ source("../R/utils.R")
 # it one of the longest eddy covariance records in Europe. The _HH suffix
 # denotes the half-hourly (HH) product: one row per 30-minute period.
 drivers_raw <- read_csv(
-  "../data/DE-Tha/DE-Tha_HH.csv",
+  file.path(data_dir, "DE-Tha", "DE-Tha_HH.csv"),
   show_col_types = FALSE
 )
 
@@ -450,8 +459,8 @@ par(mfrow = c(1, 1), mar = c(5, 4, 4, 2) + 0.1)
 # Exercise 02 loads this RDS to compare SSEM output against observations.
 # Saving here means you only need to run Exercise 01 once; re-knitting
 # Exercise 02 will always find the file even without re-running the model.
-saveRDS(output, "../data/ssem_detha_2000.rds")
-message("Saved SSEM output → data/ssem_detha_2000.rds")
+saveRDS(output, file.path(data_dir, "ssem_detha_2000.rds"))
+message("Saved SSEM output → ", file.path(data_dir, "ssem_detha_2000.rds"))
 
 # ── Explore further ───────────────────────────────────────────────────────────
 # Half-hourly driver data are available for two additional temperate forest sites:
