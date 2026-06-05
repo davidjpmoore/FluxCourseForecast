@@ -5,7 +5,7 @@ output:
   html_document:
     toc: true
     toc_float: true
-    number_sections: true
+    number_sections: false
     theme: flatly
 ---
 
@@ -100,8 +100,7 @@ source(file.path(code_dir, "utils.R"))
 
 ## Load and inspect drivers
 
-```{r drivers, message=FALSE, fig.width=10, fig.height=6,
-    fig.cap="Half-hourly PAR and air temperature at DE-Tha during 2000. Each vertical spike in PAR is one day's sunlight; the seasonal envelope shows peak insolation in June–July. Temperature drops below zero during winter."}
+```{r drivers, message=FALSE, fig.width=10, fig.height=6, fig.cap="Half-hourly PAR and air temperature at DE-Tha during 2000. Each vertical spike in PAR is one day's sunlight; the seasonal envelope shows peak insolation in June–July. Temperature drops below zero during winter."}
 
 # ── Read the DE-Tha site data ─────────────────────────────────────────────────
 # DE-Tha is a managed Norway spruce plantation (Picea abies) in Tharandt,
@@ -385,8 +384,7 @@ for (p in names(params)) {
 
 ## Run the model and examine output
 
-```{r model_run, cache=TRUE, fig.width=12, fig.height=10,
-    fig.cap="SSEM ensemble output for DE-Tha 2000. Grey envelope: 95% credible interval across 100 ensemble members. Dark line: ensemble median. x-axis: 30-minute timestep number (48 steps = 1 day; 17,568 steps = full leap year)."}
+```{r model_run, cache=TRUE, fig.width=12, fig.height=10, fig.cap="SSEM ensemble output for DE-Tha 2000. Grey envelope: 95% credible interval across 100 ensemble members. Dark line: ensemble median. x-axis: 30-minute timestep number (48 steps = 1 day; 17,568 steps = full leap year)."}
 
 # ── Assemble inputs ───────────────────────────────────────────────────────────
 # ensemble_forecast() expects a plain data.frame with exactly the columns
