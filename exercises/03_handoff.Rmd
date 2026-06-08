@@ -87,7 +87,7 @@ handoff_site <- "US-NR1"   # change to "US-MMS" if you want the Indiana site
 
 ```{r load_obs_nr1, message=FALSE}
 # ── Path to the US-NR1 half-hourly data file ──────────────────────────────────
-hr_file_nr1 <- file.path(data_dir, "US-NR1", "US-NR1_HR.csv")
+hr_file_nr1 <- file.path(data_dir, "US-NR1", "US-NR1_HH.csv")
 
 if (!file.exists(hr_file_nr1)) {
   stop(

@@ -138,15 +138,16 @@ site_timestep <- list(
 
 ```{r load_raw, message=FALSE}
 # ── Sub-daily FLUXNET data — US-NR1 (primary ENF site) ───────────────────────
-# US-NR1_HR.csv — half-hourly (30 min), timestamp column: DATETIME_START
+# US-NR1_HH.csv — half-hourly (30 min), timestamp column: DATETIME_START
 #   ISO 8601 format ("1998-01-01T00:00:00Z"); processed by the fluxnet package.
 #   Site: subalpine ENF, Niwot Ridge, Colorado; coverage 1998–2025.
+#   File uses _HH_ (ICOS/FLUXNET half-hourly convention), not _HR_ (hourly).
 #
 # IMPORTANT — US-NR1 NEE variable: this site uses NEE_CUT_REF rather than
 # NEE_VUT_REF.  See the explicit note in the US-NR1 section below for the
 # full explanation.  col_select loads NEE_CUT_REF and NEE_CUT_REF_QC here.
 usnr1_hr_raw <- read_csv(
-  file.path(data_dir, "US-NR1", "US-NR1_HR.csv"),
+  file.path(data_dir, "US-NR1", "US-NR1_HH.csv"),
   show_col_types = FALSE,
   col_select = c(DATETIME_START, NEE_CUT_REF, NEE_CUT_REF_QC)
 )
@@ -191,17 +192,29 @@ if (!is.null(dksor_hh_raw)) dksor_hh_raw <- replace_fluxnet_na(dksor_hh_raw)
 usmms_raw <- read_csv(file.path(data_dir, "US-MMS", "US-MMS_DD.csv"),
                       show_col_types = FALSE)
 
-# ── CMIP6 monthly output (all three models) ───────────────────────────────────
-# Pre-extracted from the Pangeo CMIP6 catalog at the grid cell nearest to
-# US-MMS. One row per month; units for carbon fluxes: kg C m⁻² s⁻¹.
-# CMIP6 data are currently available for US-MMS only; see the note in the
-# CMIP6 comparison chunk for how US-NR1 students should use this data.
-cesm2_raw   <- read_csv(file.path(data_dir, "cmip6", "CESM2_usmms_monthly.csv"),
-                        show_col_types = FALSE)
-ipsl_raw    <- read_csv(file.path(data_dir, "cmip6", "IPSL-CM6A-LR_usmms_monthly.csv"),
-                        show_col_types = FALSE)
-ukesm_raw   <- read_csv(file.path(data_dir, "cmip6", "UKESM1-0-LL_usmms_monthly.csv"),
-                        show_col_types = FALSE)
+# ── CMIP6 monthly output (all three models, all four sites) ───────────────────
+# Pre-extracted from the Pangeo CMIP6 catalog (extract_cmip6_allsites.py).
+# One row per month; carbon flux units: kg C m⁻² s⁻¹.
+# Available for US-NR1, US-MMS, DE-Tha, DK-Sor — three ESMs each.
+#
+# site_file_id converts a site ID to the token used in the CSV filenames:
+#   "US-NR1" → "usnr1", "US-MMS" → "usmms", "DE-Tha" → "detha", "DK-Sor" → "dksor"
+site_file_id <- function(site_id) tolower(gsub("-", "", site_id))
+
+# Load all three models for both primary sites at once.
+# DE-Tha and DK-Sor are loaded in the CMIP6 comparison chunk on demand.
+load_cmip6_site <- function(site_id) {
+  fid <- site_file_id(site_id)
+  models <- c("CESM2", "IPSL-CM6A-LR", "UKESM1-0-LL")
+  purrr::map_dfr(models, \(m) {
+    path <- file.path(data_dir, "cmip6", paste0(m, "_", fid, "_monthly.csv"))
+    df <- read_csv(path, show_col_types = FALSE)
+    dplyr::mutate(df, model = m, .before = everything())
+  })
+}
+
+cmip6_nr1_raw <- load_cmip6_site("US-NR1")   # 3 models × 504 months (historical+SSP)
+cmip6_mms_raw <- load_cmip6_site("US-MMS")   # as above
 
 # ── Discovery: print the unit and format situation ────────────────────────────
 cat("── Sub-daily FLUXNET: loaded file sizes ────────────────────────────────\n")
@@ -219,6 +232,8 @@ cat("    US-NR1:       DATETIME_START  (ISO 8601, e.g. 1998-01-01T00:00:00Z)\n")
 cat("    US-MMS:       TIMESTAMP_START (integer YYYYMMDDHHMM, e.g. 199901010000)\n")
 cat("\n── CMIP6 monthly: key columns ──────────────────────────────────────────\n")
 cat("  gpp_kgC_m2_s     kg C m⁻² s⁻¹  (very different from FLUXNET μmol units)\n")
+cat(sprintf("  US-NR1 CMIP6 rows: %d  (3 models × months)\n", nrow(cmip6_nr1_raw)))
+cat(sprintf("  US-MMS CMIP6 rows: %d  (3 models × months)\n", nrow(cmip6_mms_raw)))
 cat("\n── SSEM output (from Exercise 01) ──────────────────────────────────────\n")
 cat("  GPP [dim 3 = 5]  μmol CO₂ m⁻² s⁻¹  (rate at each timestep)\n")
 cat("  NEP [dim 3 = 6]  μmol CO₂ m⁻² s⁻¹  (positive = ecosystem gaining C)\n")
@@ -459,10 +474,10 @@ fluxnet_daily |>
 # PART C — CMIP6: convert kg C m⁻² s⁻¹ → gC m⁻² day⁻¹
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-harmonise_cmip6 <- function(df, model_label) {
-  df |>
+harmonise_cmip6 <- function(df_wide) {
+  # df_wide already has a `model` column (added by load_cmip6_site).
+  df_wide |>
     mutate(
-      model      = model_label,
       gpp_gCm2d  = gpp_kgC_m2_s * KGC_S_TO_GC_DAY,
       rh_gCm2d   = rh_kgC_m2_s  * KGC_S_TO_GC_DAY,
       ra_gCm2d   = ra_kgC_m2_s  * KGC_S_TO_GC_DAY,
@@ -472,23 +487,53 @@ harmonise_cmip6 <- function(df, model_label) {
            gpp_gCm2d, rh_gCm2d, ra_gCm2d, lai_m2_m2)
 }
 
-cesm2     <- harmonise_cmip6(cesm2_raw,  "CESM2")
-ipsl      <- harmonise_cmip6(ipsl_raw,   "IPSL-CM6A-LR")
-ukesm     <- harmonise_cmip6(ukesm_raw,  "UKESM1-0-LL")
-cmip6_all <- bind_rows(cesm2, ipsl, ukesm)
+# Harmonise both primary sites so the comparison chunk can use either
+cmip6_nr1 <- harmonise_cmip6(cmip6_nr1_raw)   # US-NR1: all 3 models
+cmip6_mms <- harmonise_cmip6(cmip6_mms_raw)   # US-MMS: all 3 models
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# PART D — FLUXCOM placeholder
+# PART D — FLUXCOM-X-BASE: read per-site monthly CSVs
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Representative annual GPP from Nelson et al. (2024) for the US-MMS region.
-# Replace with values read from data/fluxcom/ when the file is available.
-fluxcom_gpp_annual <- 1080   # gC m⁻² yr⁻¹
-fluxcom_gpp_sd     <- 130    # ±1 SD from FLUXCOM ensemble
+# FLUXCOM-X-BASE (Nelson et al. 2024, Biogeosciences) is a global machine-
+# learning upscaling of eddy-covariance measurements.  It provides a
+# continuous 0.5° global monthly estimate of GPP, NEE, and TER, bridging
+# the spatial scale between a single flux tower footprint (< 1 km²) and the
+# CMIP6 grid cell (~100 × 70 km at US-MMS latitude).
+#
+# FLUXCOM mediates the scale mismatch between tower observations and CMIP6 model
+# output: where a tower measures the flux from one forest stand and a CMIP6 cell
+# integrates across an entire landscape, FLUXCOM uses machine learning trained on
+# thousands of tower-years to produce a landscape-scale estimate at 0.5°.
+# Comparing SSEM → tower observations → FLUXCOM → CMIP6 therefore traces the
+# same carbon signal across four very different spatial scales.
+#
+# Files produced by data/fluxcom/extract_fluxcom_allsites.py from the ICOS CP.
+# Comment lines (# ...) in the CSVs contain provenance metadata — skip them.
+load_fluxcom_site <- function(site_id) {
+  path <- file.path(data_dir, "fluxcom", paste0(site_id, "_fluxcom_monthly.csv"))
+  if (!file.exists(path)) {
+    message("FLUXCOM file not found: ", path, " — skipping")
+    return(NULL)
+  }
+  # comment.char = '#' skips the header comment block written by the script
+  read.csv(path, comment.char = "#") |>
+    dplyr::mutate(
+      site      = site_id,
+      date      = as.Date(paste(year, month, "01", sep = "-"))
+    )
+}
+
+fluxcom_nr1 <- load_fluxcom_site("US-NR1")
+fluxcom_mms <- load_fluxcom_site("US-MMS")
 
 cat("\nHarmonization complete.\n")
 cat(sprintf("  FLUXNET sub-daily rows: %s\n", format(nrow(fluxnet_subdaily), big.mark=",")))
 cat(sprintf("  FLUXNET daily rows:     %s\n", format(nrow(fluxnet_daily),    big.mark=",")))
-cat(sprintf("  CMIP6 monthly rows:     %d\n", nrow(cmip6_all)))
+cat(sprintf("  CMIP6 monthly rows (NR1): %d  CMIP6 (MMS): %d\n",
+            nrow(cmip6_nr1), nrow(cmip6_mms)))
+cat(sprintf("  FLUXCOM monthly rows: NR1=%d  MMS=%d\n",
+            if (!is.null(fluxcom_nr1)) nrow(fluxcom_nr1) else 0L,
+            if (!is.null(fluxcom_mms)) nrow(fluxcom_mms) else 0L))
 ```
 
 ---
@@ -754,39 +799,50 @@ residuals_dd |>
 > **Choose your model.** Set `chosen_model` to one of:
 > `"CESM2"`, `"IPSL-CM6A-LR"`, `"UKESM1-0-LL"`
 
-> **CMIP6 data availability note.** CMIP6 model output has been pre-extracted
-> for the grid cell nearest to **US-MMS** (Morgan Monroe State Forest, Indiana).
-> Extraction for US-NR1 (Niwot Ridge, Colorado) is planned but not yet complete.
-> If you ran SSEM at US-NR1, use the US-MMS CMIP6 data as a **regional
-> reference** for comparison — the Midwest broad-scale carbon cycle context —
-> rather than as a point comparison. Both US-NR1 and US-MMS are temperate North
-> American forests, so the seasonal structure of the CMIP6 output (spring
-> green-up timing, summer GPP peak, autumn senescence) is still informative for
-> understanding how ESM simulations relate to tower observations at your site.
-> If you worked with US-MMS in Exercise 01, the CMIP6 comparison is a direct
-> (though scale-mismatched) site-to-grid comparison.
+> **CMIP6 and FLUXCOM data availability.** CMIP6 model output has been
+> pre-extracted for the grid cells nearest to all four sites (US-NR1, US-MMS,
+> DE-Tha, DK-Sor) using `data/cmip6/extract_cmip6_allsites.py`.
+> FLUXCOM-X-BASE monthly data have likewise been extracted for all four sites
+> using `data/fluxcom/extract_fluxcom_allsites.py`.
+> Set `chosen_site` and `chosen_model` below to work with your primary site.
 
 ```{r cmip6_compare, fig.width=10, fig.height=6}
 #| fig.cap: >
 #|   Monthly GPP and heterotrophic respiration (Rh) from the selected CMIP6
-#|   model (coloured lines) versus FLUXNET monthly means at US-MMS (black
-#|   points). Both axes show gC m⁻² day⁻¹ (monthly average rate), 1999–2014.
+#|   model (coloured lines) versus FLUXNET monthly means (black points) at the
+#|   chosen site. Both axes show gC m⁻² day⁻¹ (monthly average rate), 1980–2021.
 
 # ── USER SELECTION ────────────────────────────────────────────────────────────
-chosen_model <- "CESM2"   # options: "CESM2", "IPSL-CM6A-LR", "UKESM1-0-LL"
+chosen_site  <- "US-NR1"      # options: "US-NR1", "US-MMS", "DE-Tha", "DK-Sor"
+chosen_model <- "CESM2"       # options: "CESM2", "IPSL-CM6A-LR", "UKESM1-0-LL"
 # ─────────────────────────────────────────────────────────────────────────────
 
 stopifnot(
+  "`chosen_site` must be 'US-NR1', 'US-MMS', 'DE-Tha', or 'DK-Sor'" =
+    chosen_site %in% c("US-NR1", "US-MMS", "DE-Tha", "DK-Sor"),
   "`chosen_model` must be 'CESM2', 'IPSL-CM6A-LR', or 'UKESM1-0-LL'" =
     chosen_model %in% c("CESM2", "IPSL-CM6A-LR", "UKESM1-0-LL")
 )
-cat("Comparing against:", chosen_model, "\n")
+cat("Comparing:", chosen_site, "vs", chosen_model, "\n")
 
-cmip6_chosen <- cmip6_all |>
+# Load CMIP6 for the chosen site (US-NR1 and US-MMS already in memory;
+# DE-Tha and DK-Sor are loaded on demand to avoid loading all 12 CSVs upfront)
+cmip6_site_raw <- switch(
+  chosen_site,
+  "US-NR1" = cmip6_nr1_raw,
+  "US-MMS" = cmip6_mms_raw,
+  load_cmip6_site(chosen_site)   # DE-Tha or DK-Sor: load now
+)
+cmip6_site <- harmonise_cmip6(cmip6_site_raw)
+
+cmip6_chosen <- cmip6_site |>
   filter(model == chosen_model) |>
   mutate(date = as.Date(paste(year, month, "01", sep = "-")))
 
-# Aggregate US-MMS FLUXNET to monthly means (gC m⁻² day⁻¹)
+# Aggregate the US-MMS FLUXNET daily file to monthly means for comparison.
+# For US-NR1 and the extension sites, we use the FLUXCOM monthly estimate as
+# the observational reference for the CMIP6 comparison (tower and CMIP6 grid
+# cells are not directly comparable in scale; FLUXCOM bridges that gap).
 usmms_monthly <- usmms_raw |>
   mutate(date = as.Date(DATE)) |>
   filter(year(date) >= 1999, year(date) <= 2014) |>
@@ -803,17 +859,32 @@ usmms_monthly <- usmms_raw |>
   ) |>
   mutate(date = as.Date(paste(year, month, "01", sep = "-")))
 
+# Choose the observational reference for the comparison plot:
+# US-MMS → FLUXNET monthly means; other sites → FLUXCOM monthly GPP/TER
+if (chosen_site == "US-MMS") {
+  obs_long <- usmms_monthly |>
+    select(date, GPP = gpp_gCm2d, Rh = reco_gCm2d) |>
+    pivot_longer(c(GPP, Rh), names_to = "variable", values_to = "value") |>
+    mutate(source = paste("FLUXNET", chosen_site))
+} else {
+  # Use FLUXCOM as the landscape-scale observational reference
+  fc <- if (chosen_site == "US-NR1") fluxcom_nr1 else load_fluxcom_site(chosen_site)
+  obs_long <- if (!is.null(fc)) {
+    fc |>
+      filter(year >= 2001, year <= 2014) |>
+      mutate(date = as.Date(paste(year, month, "01", sep = "-"))) |>
+      select(date, GPP = GPP_gC_m2_d, Rh = TER_gC_m2_d) |>
+      pivot_longer(c(GPP, Rh), names_to = "variable", values_to = "value") |>
+      mutate(source = paste("FLUXCOM", chosen_site))
+  } else tibble()
+}
+
 cmip6_long <- cmip6_chosen |>
   select(date, GPP = gpp_gCm2d, Rh = rh_gCm2d) |>
   pivot_longer(c(GPP, Rh), names_to = "variable", values_to = "value") |>
   mutate(source = chosen_model)
 
-flux_long <- usmms_monthly |>
-  select(date, GPP = gpp_gCm2d, Rh = reco_gCm2d) |>
-  pivot_longer(c(GPP, Rh), names_to = "variable", values_to = "value") |>
-  mutate(source = "FLUXNET US-MMS")
-
-bind_rows(cmip6_long, flux_long) |>
+bind_rows(cmip6_long, obs_long) |>
   ggplot(aes(x = date, y = value, colour = source)) +
     geom_line(linewidth = 0.4, alpha = 0.7) +
     geom_smooth(method = "loess", span = 0.15, se = FALSE,
@@ -821,18 +892,23 @@ bind_rows(cmip6_long, flux_long) |>
     facet_wrap(~ variable, ncol = 1, scales = "free_y",
                labeller = as_labeller(c(
                  GPP = "GPP (gC m⁻² day⁻¹)",
-                 Rh  = "Rh / RECO (gC m⁻² day⁻¹) — see note on scale mismatch"
+                 Rh  = "Rh / TER (gC m⁻² day⁻¹) — see scale mismatch note"
                ))) +
     scale_colour_manual(
-      values = c("FLUXNET US-MMS" = "grey20",
-                 "CESM2"          = "#E07B39",
-                 "IPSL-CM6A-LR"   = "#5B8DB8",
-                 "UKESM1-0-LL"    = "#6BAE75")[c("FLUXNET US-MMS", chosen_model)]
+      values = c(
+        "FLUXNET US-MMS"  = "grey20",
+        "FLUXCOM US-NR1"  = "grey20",
+        "FLUXCOM DE-Tha"  = "grey20",
+        "FLUXCOM DK-Sor"  = "grey20",
+        "CESM2"           = "#E07B39",
+        "IPSL-CM6A-LR"    = "#5B8DB8",
+        "UKESM1-0-LL"     = "#6BAE75"
+      )
     ) +
     scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
     labs(
-      title    = paste("Monthly GPP and Rh —", chosen_model, "vs FLUXNET US-MMS"),
-      subtitle = "1999-2014 | gC m-2 day-1 | Thick lines: LOESS trend",
+      title    = paste("Monthly GPP and Rh/TER —", chosen_model, "vs observations at", chosen_site),
+      subtitle = "2001-2014 | gC m-2 day-1 | Thick lines: LOESS trend",
       x        = NULL,
       y        = NULL,
       colour   = NULL
@@ -845,14 +921,130 @@ bind_rows(cmip6_long, flux_long) |>
     )
 ```
 
-> **Scale mismatch note.** Each CMIP6 grid cell represents roughly 1° × 1° of
-> latitude and longitude — approximately 100 km × 70 km at the latitude of
-> US-MMS. That single number blends forest, cropland, urban surface, and open
-> water, weighted by their fractional coverage in the land surface model.
-> The flux tower footprint covers a few hundred metres to perhaps 1–2 km at
-> most. A better use of ESM output is to ask: does the model reproduce the
-> *direction* of the seasonal cycle? Does its interannual variability correlate
-> with observations? Does its decadal trend match the atmospheric record?
+> **Scale mismatch and FLUXCOM as a bridge.** Each CMIP6 grid cell represents
+> roughly 1° × 1° of latitude — approximately 100 km × 70 km at mid-latitudes.
+> That single number blends every land cover type in the cell. The flux tower
+> footprint covers a few hundred metres to ~2 km. FLUXCOM-X-BASE (Nelson et al.
+> 2024) bridges this gap: it is trained on thousands of tower-years but predicts
+> fluxes on a 0.5° grid, making it a better observational reference when
+> comparing to CMIP6 than a single tower alone.
+> For US-MMS (which provides a DD FLUXNET daily file), the FLUXNET monthly mean
+> is used directly. For other sites, the FLUXCOM monthly estimate is the
+> landscape-scale reference. Ask: does the model reproduce the *direction* of
+> the seasonal cycle? Does its interannual variability correlate with
+> observations? Does its decadal trend match the atmospheric record?
+
+---
+
+## FLUXCOM comparison
+
+```{r fluxcom_compare, fig.width=10, fig.height=5}
+#| fig.cap: >
+#|   Annual GPP from SSEM, FLUXCOM-X-BASE, and the three CMIP6 models at both
+#|   primary sites (US-NR1 and US-MMS). FLUXCOM mediates the spatial scale
+#|   mismatch: it provides a 0.5° landscape estimate comparable to the CMIP6
+#|   grid cell, while SSEM simulates the same small forest stand as the tower.
+
+# Build annual GPP totals (gC m-2 yr-1) for all products at both primary sites
+# so students can see the full hierarchy: SSEM < FLUXCOM < CMIP6 scale chain.
+
+annual_gpp_list <- list()
+
+# SSEM annual GPP (gC m-2 yr-1): sum daily median GPP over the run year
+for (site_id in c("US-NR1", "US-MMS")) {
+  ssem_info_local <- if (site_id == "US-NR1") nr1_ssem else mms_ssem
+  # nr1_ssem / mms_ssem are the output of build_ssem_daily() from the
+  # harmonise chunk — they have columns date and gpp_gCm2d (median daily GPP)
+  if (!is.null(ssem_info_local)) {
+    annual_gpp_list[[paste0("SSEM_", site_id)]] <- ssem_info_local |>
+      dplyr::summarise(
+        source  = paste("SSEM", site_id),
+        gpp_ann = sum(gpp_gCm2d, na.rm = TRUE)
+      )
+  }
+}
+
+# FLUXCOM annual GPP (gC m-2 yr-1): sum of monthly (gC m-2 d-1) × days-in-month
+for (pair in list(list("US-NR1", fluxcom_nr1), list("US-MMS", fluxcom_mms))) {
+  site_id <- pair[[1]]; fc <- pair[[2]]
+  if (!is.null(fc)) {
+    fc_ann <- fc |>
+      dplyr::mutate(
+        days = lubridate::days_in_month(date),
+        gpp_monthly = GPP_gC_m2_d * days
+      ) |>
+      dplyr::group_by(year) |>
+      dplyr::summarise(gpp_ann = sum(gpp_monthly, na.rm = TRUE), .groups = "drop") |>
+      dplyr::summarise(
+        source  = paste("FLUXCOM", site_id),
+        gpp_ann = mean(gpp_ann, na.rm = TRUE)   # mean across 2001-2021
+      )
+    annual_gpp_list[[paste0("FLUXCOM_", site_id)]] <- fc_ann
+  }
+}
+
+# CMIP6 annual GPP (gC m-2 yr-1): sum of monthly (gC m-2 d-1) × days-in-month
+for (pair in list(list("US-NR1", cmip6_nr1), list("US-MMS", cmip6_mms))) {
+  site_id <- pair[[1]]; cm <- pair[[2]]
+  cm_ann <- cm |>
+    dplyr::mutate(
+      days = lubridate::days_in_month(as.Date(paste(year, month, "01", sep="-"))),
+      gpp_monthly = gpp_gCm2d * days
+    ) |>
+    dplyr::filter(year >= 2001, year <= 2014) |>
+    dplyr::group_by(model, year) |>
+    dplyr::summarise(gpp_ann = sum(gpp_monthly, na.rm = TRUE), .groups = "drop") |>
+    dplyr::group_by(model) |>
+    dplyr::summarise(gpp_ann = mean(gpp_ann, na.rm = TRUE), .groups = "drop") |>
+    dplyr::mutate(source = paste(model, site_id))
+  for (i in seq_len(nrow(cm_ann))) {
+    annual_gpp_list[[paste0(cm_ann$model[i], "_", site_id)]] <- cm_ann[i, ] |>
+      select(source, gpp_ann)
+  }
+}
+
+# Combine and plot
+ann_df <- dplyr::bind_rows(annual_gpp_list) |>
+  dplyr::mutate(
+    site    = dplyr::case_when(
+      grepl("NR1", source) ~ "US-NR1 (ENF, subalpine)",
+      grepl("MMS", source) ~ "US-MMS (DBF, temperate)"
+    ),
+    product = dplyr::case_when(
+      grepl("^SSEM",    source) ~ "SSEM (point)",
+      grepl("^FLUXCOM", source) ~ "FLUXCOM (0.5°)",
+      grepl("CESM2",    source) ~ "CESM2 (~1°)",
+      grepl("IPSL",     source) ~ "IPSL-CM6A-LR (~1°)",
+      grepl("UKESM",    source) ~ "UKESM1-0-LL (~1°)"
+    )
+  )
+
+ggplot(ann_df |> tidyr::drop_na(site, product),
+       aes(x = product, y = gpp_ann, fill = product)) +
+  geom_col(width = 0.6) +
+  facet_wrap(~ site, ncol = 2, scales = "free_y") +
+  labs(
+    title    = "Annual GPP across spatial scales",
+    subtitle = "SSEM (point model) | FLUXCOM (0.5° ML upscaling) | CMIP6 (~1° ESM)",
+    x        = NULL,
+    y        = "Annual GPP (gC m⁻² yr⁻¹)",
+    fill     = NULL
+  ) +
+  scale_fill_manual(values = c(
+    "SSEM (point)"       = "#4a9e4a",
+    "FLUXCOM (0.5°)"     = "#d4a017",
+    "CESM2 (~1°)"        = "#E07B39",
+    "IPSL-CM6A-LR (~1°)" = "#5B8DB8",
+    "UKESM1-0-LL (~1°)"  = "#6BAE75"
+  )) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text.x      = element_text(angle = 30, hjust = 1),
+    strip.background = element_blank(),
+    strip.text       = element_text(face = "bold"),
+    legend.position  = "none"
+  )
+```
 
 ---
 
@@ -934,16 +1126,16 @@ for (s in names(obs_dd_files)) {
 }
 
 # ── CMIP6 model output ────────────────────────────────────────────────────────
-cmip6_out_name <- sprintf("cmip6_%s.csv", chosen_model)
+cmip6_out_name <- sprintf("cmip6_%s_%s.csv", chosen_site, chosen_model)
 write_csv(cmip6_chosen, file.path(output_dir, cmip6_out_name))
 cat(sprintf("Saved: %s  (%d rows)\n",
             file.path(output_dir, cmip6_out_name), nrow(cmip6_chosen)))
 
 message("
 Output files saved to exercises/output/
-  ssem_US-NR1.csv, ssem_US-MMS.csv  — SSEM daily ensemble output
-  obs_US-NR1_daily.csv, obs_US-MMS_daily.csv  — FLUXNET daily observations
-  cmip6_*.csv  — CMIP6 monthly model output (US-MMS grid cell)
+  ssem_US-NR1.csv, ssem_US-MMS.csv          — SSEM daily ensemble output
+  obs_US-NR1_daily.csv, obs_US-MMS_daily.csv — FLUXNET daily observations
+  cmip6_{site}_{model}.csv                   — CMIP6 monthly model output (chosen site)
 ")
 ```
 

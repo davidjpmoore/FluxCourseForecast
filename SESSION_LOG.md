@@ -69,3 +69,43 @@ Auto-updated by Claude Code. Each entry records a task completion.
      verify dim == c(48,5,12); prints GPP median at midday as a sanity value
 - Final summary: "READY TO START — all N checks passed" or count + contact info
 - Local test run result: all 22 checks PASS; GPP median at step 24 = 10.673 umol CO2 m-2 s-1
+
+## [2026-06-08] Steps 1–6: US-NR1 HH rename, CMIP6/FLUXCOM extraction, 02_validation.Rmd update, staging folder, test script
+
+### Step 1: Rename US-NR1_HR.csv → US-NR1_HH.csv
+- ICOS/FLUXNET convention: _HH_ = half-hourly (30 min), _HR_ = genuinely hourly
+- Physical files renamed: data/US-NR1/US-NR1_HH.csv and exercises/student_data/.../US-NR1_HH.csv
+- References updated in: 01_run_model.Rmd, 02_validation.Rmd, 03_handoff.Rmd, test_student_setup.R, download_usnr1.R
+- Confirmed clean: no remaining US-NR1_HR references in exercises/ or data/US-NR1/
+
+### Step 2: Extract CMIP6 data for US-NR1, DE-Tha, DK-Sor
+- Ran data/cmip6/extract_cmip6_allsites.py with ~/.virtualenvs/cmip6 Python environment
+- 9 new CSVs: {CESM2,IPSL-CM6A-LR,UKESM1-0-LL}_{usnr1,detha,dksor}_monthly.csv
+- CESM2 uses SSP370, UKESM1-0-LL historical only through 2014 (documented in CSV headers)
+
+### Step 3: Extract FLUXCOM-X-BASE data for all four sites
+- Created and ran data/fluxcom/extract_fluxcom_allsites.py
+- Access method: ICOS Carbon Portal public download via licence_accept endpoint (no auth required for CCBY4 data)
+- PIDs sourced from official GitLab download script (fluxcom/fluxcomxdata)
+- 4 CSVs, 252 rows each (2001-01 to 2021-12): GPP_gC_m2_d, NEE_gC_m2_d, ET_mm_d, TER_gC_m2_d
+- TER derived as GPP − NEE; raw NetCDF files cached in data/fluxcom/raw/ (gitignored)
+
+### Step 4: Update exercises/02_validation.Rmd
+- Added load_cmip6_site() and load_fluxcom_site() helper functions
+- cmip6_compare chunk: chosen_site variable selects primary site; non-MMS sites use FLUXCOM as observational reference
+- New fluxcom_compare chunk: bar chart of annual GPP across SSEM point / FLUXCOM 0.5° / CMIP6 ~1°
+- Updated scale hierarchy note
+
+### Step 5: Update student staging folder
+- cmip6/: 12 CSVs (was 3; added usnr1, detha, dksor for all 3 models)
+- fluxcom/ (new subfolder): 4 CSVs (US-MMS, US-NR1, DE-Tha, DK-Sor)
+- US-NR1/US-NR1_HH.csv renamed from HR; zip NOT rebuilt
+
+### Step 6: Update exercises/test_student_setup.R
+- Required file list expanded from 13 to 26 entries; 27/27 checks pass
+- Added 9 CMIP6 CSVs for usnr1, detha, dksor; 4 FLUXCOM monthly CSVs
+- Smoke test path updated to US-NR1_HH.csv
+
+### Gitignore fix
+- Removed data/fluxcom/*.csv from .gitignore (small extracted site CSVs, tracked like data/cmip6/*.csv)
+- data/fluxcom/raw/ remains gitignored

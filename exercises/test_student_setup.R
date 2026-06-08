@@ -83,7 +83,7 @@ required_files <- list(
   list(rel = "R/functions.R",                      desc = "SSEM model code"),
   list(rel = "R/utils.R",                           desc = "helper utilities"),
   # Exercise 01 & 03 drivers
-  list(rel = "US-NR1/US-NR1_HR.csv",               desc = "US-NR1 half-hourly drivers (Ex 01, 03)"),
+  list(rel = "US-NR1/US-NR1_HH.csv",               desc = "US-NR1 half-hourly drivers (Ex 01, 03)"),
   list(rel = "US-MMS/US-MMS_HR.csv",               desc = "US-MMS hourly drivers (Ex 01, 03)"),
   # Exercise 02 sub-daily observations
   list(rel = "US-NR1/US-NR1_DD.csv",               desc = "US-NR1 daily observations (Ex 02)"),
@@ -93,10 +93,24 @@ required_files <- list(
   list(rel = "DE-Tha/DE-Tha_DD.csv",               desc = "DE-Tha daily (extension)"),
   list(rel = "DK-Sor/DK-Sor_HH.csv",               desc = "DK-Sor half-hourly (extension)"),
   list(rel = "DK-Sor/DK-Sor_DD.csv",               desc = "DK-Sor daily (extension)"),
-  # CMIP6
-  list(rel = "cmip6/CESM2_usmms_monthly.csv",       desc = "CMIP6 CESM2 monthly"),
-  list(rel = "cmip6/IPSL-CM6A-LR_usmms_monthly.csv",desc = "CMIP6 IPSL monthly"),
-  list(rel = "cmip6/UKESM1-0-LL_usmms_monthly.csv", desc = "CMIP6 UKESM monthly")
+  # CMIP6 — all four sites, three models each
+  list(rel = "cmip6/CESM2_usnr1_monthly.csv",          desc = "CMIP6 CESM2 US-NR1"),
+  list(rel = "cmip6/IPSL-CM6A-LR_usnr1_monthly.csv",   desc = "CMIP6 IPSL US-NR1"),
+  list(rel = "cmip6/UKESM1-0-LL_usnr1_monthly.csv",    desc = "CMIP6 UKESM US-NR1"),
+  list(rel = "cmip6/CESM2_usmms_monthly.csv",           desc = "CMIP6 CESM2 US-MMS"),
+  list(rel = "cmip6/IPSL-CM6A-LR_usmms_monthly.csv",   desc = "CMIP6 IPSL US-MMS"),
+  list(rel = "cmip6/UKESM1-0-LL_usmms_monthly.csv",    desc = "CMIP6 UKESM US-MMS"),
+  list(rel = "cmip6/CESM2_detha_monthly.csv",           desc = "CMIP6 CESM2 DE-Tha"),
+  list(rel = "cmip6/IPSL-CM6A-LR_detha_monthly.csv",   desc = "CMIP6 IPSL DE-Tha"),
+  list(rel = "cmip6/UKESM1-0-LL_detha_monthly.csv",    desc = "CMIP6 UKESM DE-Tha"),
+  list(rel = "cmip6/CESM2_dksor_monthly.csv",           desc = "CMIP6 CESM2 DK-Sor"),
+  list(rel = "cmip6/IPSL-CM6A-LR_dksor_monthly.csv",   desc = "CMIP6 IPSL DK-Sor"),
+  list(rel = "cmip6/UKESM1-0-LL_dksor_monthly.csv",    desc = "CMIP6 UKESM DK-Sor"),
+  # FLUXCOM-X-BASE — all four sites
+  list(rel = "fluxcom/US-NR1_fluxcom_monthly.csv",      desc = "FLUXCOM US-NR1 monthly"),
+  list(rel = "fluxcom/US-MMS_fluxcom_monthly.csv",      desc = "FLUXCOM US-MMS monthly"),
+  list(rel = "fluxcom/DE-Tha_fluxcom_monthly.csv",      desc = "FLUXCOM DE-Tha monthly"),
+  list(rel = "fluxcom/DK-Sor_fluxcom_monthly.csv",      desc = "FLUXCOM DK-Sor monthly")
 )
 
 for (item in required_files) {
@@ -184,8 +198,8 @@ if (ok_fn && ok_ut && dir.exists(data_dir)) {
     library(readr,    quietly = TRUE, warn.conflicts = FALSE)
     library(lubridate,quietly = TRUE, warn.conflicts = FALSE)
 
-    hr_path <- file.path(data_dir, "US-NR1", "US-NR1_HR.csv")
-    if (!file.exists(hr_path)) stop("US-NR1_HR.csv not found")
+    hr_path <- file.path(data_dir, "US-NR1", "US-NR1_HH.csv")
+    if (!file.exists(hr_path)) stop("US-NR1_HH.csv not found")
 
     # Load just enough rows for the smoke test — the file is large but we only
     # need the first 48 half-hourly rows (one day).
@@ -256,7 +270,7 @@ results[["smoke_test"]] <- pass_fail(
   ok_smoke,
   paste0(
     "Smoke test failed.  Check that functions.R sourced correctly (Step 4)\n",
-    "         and that US-NR1_HR.csv exists and has data (Step 2)."
+    "         and that US-NR1_HH.csv exists and has data (Step 2)."
   )
 )
 

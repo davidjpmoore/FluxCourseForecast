@@ -46,8 +46,9 @@
 ##   use "_HH_" for half-hourly (30-min) data.  The manifest time_resolution
 ##   label ("HR" vs "HH") tells you which convention this download used.
 ##   The discovery step in §8 will print the actual label; the RES_MAP in §9
-##   is initialised to expect "HR" but the output filenames always follow the
-##   user specification ("US-NR1_HR.csv") regardless of internal labelling.
+##   is initialised to expect "HR" but the output filename is always written as
+##   "US-NR1_HH.csv" to follow the ICOS/FLUXNET half-hourly convention and
+##   to distinguish the 30-min data from the US-MMS hourly (_HR_) product.
 ##
 ## Product version downloaded: AMF_US-NR1_FLUXNET_1998–YYYY_v1.3_r1 (or latest)
 ##   Available resolutions: HR (or HH), DD, WW, MM, YY  (FLUXMET + ERA5)
@@ -332,9 +333,10 @@ if (!is.null(bif)) cat(sprintf("  BIF: %d rows × %d cols\n", nrow(bif), ncol(bi
 ## ==========================================================================
 ## 10. Save CSVs
 ## ==========================================================================
-## Output filenames follow the convention "US-NR1_HR.csv" as specified in
-## the task, regardless of whether the internal manifest label was "HR" or
-## "HH" — the filename is documentation for students, not a manifest label.
+## Output filenames use _HH_ for the half-hourly product, following the
+## ICOS/FLUXNET convention, regardless of whether the AmeriFlux manifest
+## internally labels the file "HR" or "HH".  This distinguishes the 30-min
+## US-NR1 file from the genuinely hourly US-MMS _HR_ product.
 
 message("\n--- Saving CSV files ---")
 
@@ -349,7 +351,7 @@ save_csv <- function(df, fname, label) {
                   fname, nrow(df), ncol(df), file.size(path) / 1e6))
 }
 
-save_csv(hr,      "US-NR1_HR.csv",        "FLUXMET sub-daily")
+save_csv(hr,      "US-NR1_HH.csv",        "FLUXMET sub-daily")
 save_csv(dd,      "US-NR1_DD.csv",        "FLUXMET DD")
 save_csv(ww,      "US-NR1_WW.csv",        "FLUXMET WW")
 save_csv(mm,      "US-NR1_MM.csv",        "FLUXMET MM")

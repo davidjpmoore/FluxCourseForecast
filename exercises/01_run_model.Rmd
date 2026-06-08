@@ -120,13 +120,14 @@ source(file.path(code_dir, "utils.R"))
 # spruce (Picea engelmannii), and lodgepole pine (Pinus contorta).  Continuous
 # AmeriFlux tower measurements have been made since 1998.
 #
-# The _HR_ suffix denotes the AmeriFlux half-hourly product: one row per
-# 30-minute period, 48 rows per calendar day.  Despite the "HR" (hourly) label
-# in the filename convention, the data are half-hourly — the naming follows the
-# AmeriFlux v1.3 data product convention.  The timestamp column is DATETIME_START
-# in ISO 8601 format (same as the European FLUXNET sites DE-Tha and DK-Sor).
+# The _HH_ suffix denotes the half-hourly product: one row per 30-minute
+# period, 48 rows per calendar day.  The ICOS/FLUXNET convention uses _HH_ for
+# half-hourly data; earlier AmeriFlux product versions used _HR_ for this file.
+# This repository uses _HH_ throughout to distinguish it from US-MMS which
+# is genuinely hourly (_HR_).  The timestamp column is DATETIME_START in
+# ISO 8601 format (same as the European FLUXNET sites DE-Tha and DK-Sor).
 nr1_raw <- read_csv(
-  file.path(data_dir, "US-NR1", "US-NR1_HR.csv"),
+  file.path(data_dir, "US-NR1", "US-NR1_HH.csv"),
   show_col_types = FALSE
 )
 
