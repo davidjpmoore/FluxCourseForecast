@@ -188,3 +188,27 @@ Auto-updated by Claude Code. Each entry records a task completion.
 - Path: ~/Library/CloudStorage/GoogleDrive-setanta.research@gmail.com/My Drive/FLUXCOURSE 2026 Shared Resources/Week 2 Instructional Materials/Tuesday_AM_SSEM_part1.zip
 - Size confirmed: 701 MB
 - Timestamp: 2026-06-08 13:39
+
+## [2026-06-08] Task: Build self-contained offline interactive HTML dashboard
+
+### exercises/build_dashboard.R (new)
+- R script that reads SSEM RDS files (ssem_usnr1_2008.rds, ssem_usmms_2008.rds), FLUXNET daily CSVs, FLUXCOM monthly CSVs, and CMIP6 monthly CSVs
+- Aggregates SSEM sub-daily → daily (with 2.5/50/97.5% ensemble CI), monthly (mean), annual (sum)
+- Converts all fluxes to gC m-2 d-1 for daily/monthly/annual; retains umol m-2 s-1 for sub-daily SSEM
+- Serializes all data to JSON (~0.6 MB), downloads and caches Plotly.js 2.26.2 (~3.6 MB)
+- Assembles single-file HTML using paste0() (not sprintf — Plotly.js contains literal % chars)
+- Plotly.js cached to exercises/.plotly.min.js (gitignored); re-used on subsequent builds
+
+### exercises/dashboard.html (new)
+- Self-contained offline HTML dashboard, 4.2 MB (within 20 MB limit)
+- Site tabs: US-NR1 (ENF, subalpine), US-MMS (DBF, temperate)
+- Variable selector: NEE, GPP, Rh, LAI, ET, Energy balance (SW/LW/LE/H)
+- Timescale toggle: sub-daily, daily, monthly, annual
+- Sidebar checkboxes: SSEM median, SSEM 95% CI, FLUXNET, FLUXCOM, CESM2, IPSL, UKESM
+- Cost functions panel: RMSE, bias (SSEM − obs), Pearson r (SSEM vs FLUXNET daily; NEE and GPP only)
+- Expandable documentation panel with data stream reference table and 6 caveats
+- Navy/white palette, Georgia font, Plotly unified hover, no CDN dependencies
+- Copied to exercises/student_data/Tuesday_AM_SSEM_part1/dashboard.html (zip NOT rebuilt)
+
+### .gitignore update
+- Added exercises/.plotly.min.js (Plotly.js cache, 3.6 MB, not committed)

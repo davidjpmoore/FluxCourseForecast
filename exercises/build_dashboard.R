@@ -1,0 +1,776 @@
+#!/usr/bin/env Rscript
+# =============================================================================
+# build_dashboard.R — FluxCourseForecast 2026
+# Generates exercises/dashboard.html: a self-contained offline HTML dashboard
+# embedding all data, Plotly.js, and interactive JS/CSS in one file.
+#
+# Run from the repo root:  Rscript exercises/build_dashboard.R
+# Output:                  exercises/dashboard.html
+# =============================================================================
+
+suppressPackageStartupMessages({
+  library(jsonlite)
+  library(dplyr)
+  library(lubridate)
+  library(readr)
+})
+
+Sys.setenv(RENV_CONFIG_SYNCHRONIZED_CHECK = "FALSE")
+
+cat("=== FluxCourseForecast 2026 — Dashboard Builder ===\n\n")
+
+# ─── Paths ────────────────────────────────────────────────────────────────────
+DATA_DIR    <- "data"
+OUT_HTML    <- "exercises/dashboard.html"
+PLOTLY_CACHE <- "exercises/.plotly.min.js"   # cached, gitignored
+
+# ─── Physical constants and conversion factors ────────────────────────────────
+# μmol CO2 m-2 s-1 × step_seconds × 12.011e-6 g/μmol = gC m-2 per step
+# For daily total: sum over steps × (step_s × 12.011e-6)
+UMOL_TO_GC_PER_S <- 12.011e-6   # g C per μmol CO2
+
+# kg C m-2 s-1 → gC m-2 d-1
+KGC_S_TO_GC_DAY <- 1e3 * 86400
+
+# W m-2 (latent heat) → mm d-1 (ET); λ = 2.45 MJ kg-1
+LE_TO_MM_DAY <- 86400 / 2.45e6
+
+# SSEM output variable indices (1-based R; order: Bleaf Bwood BSOM LAI GPP NEP Ra NPPw NPPl Rh litter mort)
+I_LAI <- 4L; I_GPP <- 5L; I_NEP <- 6L; I_RA <- 7L; I_RH <- 10L
+
+rnd <- function(x, d = 4) round(x, d)
+
+# ─── Helpers: ensemble CI and daily aggregation ───────────────────────────────
+
+# Quantile CI across ensemble dimension of a matrix [n_time x n_ens]
+ens_ci <- function(m) {
+  q <- apply(m, 1, quantile, c(0.025, 0.5, 0.975), na.rm = TRUE)
+  list(lo = rnd(q[1, ]), med = rnd(q[2, ]), hi = rnd(q[3, ]))
+}
+
+# Aggregate sub-daily SSEM array to daily carbon fluxes (gC m-2 d-1) and LAI
+agg_to_daily <- function(arr, steps_per_day, step_s) {
+  n     <- dim(arr)[1]
+  n_d   <- n %/% steps_per_day
+  n_use <- n_d * steps_per_day
+  a     <- arr[seq_len(n_use), , , drop = FALSE]
+  di    <- rep(seq_len(n_d), each = steps_per_day)
+  conv  <- step_s * UMOL_TO_GC_PER_S   # per-step → gC m-2
+
+  agg_flux_ci <- function(vi, negate = FALSE) {
+    m <- apply(a[, , vi], 2, function(e) tapply(e * (if (negate) -1 else 1), di, sum) * conv)
+    ens_ci(m)
+  }
+  agg_lai_ci <- function() {
+    m <- apply(a[, , I_LAI], 2, function(e) tapply(e, di, mean))
+    ens_ci(m)
+  }
+
+  list(
+    n_days  = n_d,
+    day_idx = di,
+    gpp = agg_flux_ci(I_GPP),
+    nee = agg_flux_ci(I_NEP, negate = TRUE),  # NEE = -NEP
+    rh  = agg_flux_ci(I_RH),
+    ra  = agg_flux_ci(I_RA),
+    lai = agg_lai_ci()
+  )
+}
+
+# ─── SSEM data processor ─────────────────────────────────────────────────────
+proc_ssem <- function(rds_path, steps_per_day, run_year) {
+  cat(sprintf("  SSEM [%s] %s...\n", run_year, basename(rds_path)))
+  arr    <- readRDS(rds_path)
+  step_s <- (24L * 60L / steps_per_day) * 60L   # seconds per timestep
+  n      <- dim(arr)[1]
+
+  # ── Daily aggregation ────────────────────────────────────────────────────
+  dd <- agg_to_daily(arr, steps_per_day, step_s)
+  n_d     <- dd$n_days
+  dates_d <- format(seq.Date(as.Date(sprintf("%d-01-01", run_year)),
+                              by = "day", length.out = n_d))
+  mo <- as.integer(substr(dates_d, 6, 7))
+
+  # ── Monthly means (mean of daily values = mean daily rate in gC m-2 d-1) ─
+  mo_mean <- function(v) rnd(sapply(1:12, function(m) mean(v[mo == m], na.rm = TRUE)))
+  dates_m <- sprintf("%d-%02d-01", run_year, 1:12)
+
+  # ── Annual totals (sum of daily gC m-2 d-1 = gC m-2 yr-1) ───────────────
+  s <- function(v) rnd(sum(v, na.rm = TRUE), 1)
+
+  # ── Sub-daily (thinned ×4: every 2 h for NR1, every 4 h for MMS) ────────
+  n_use <- dd$n_days * steps_per_day
+  si    <- seq(1L, n_use, 4L)
+  dt0   <- as.POSIXct(sprintf("%d-01-01 00:00:00", run_year), tz = "UTC")
+  sdt   <- format(dt0 + (si - 1L) * step_s, "%Y-%m-%dT%H:%M", tz = "UTC")
+
+  # Sub-daily: instantaneous median (μmol m-2 s-1)
+  sd_med <- function(vi, negate = FALSE) {
+    raw <- arr[si, , vi]
+    rnd(apply(raw, 1, median, na.rm = TRUE) * (if (negate) -1 else 1), 3)
+  }
+
+  list(
+    subdaily = list(
+      dates = sdt,
+      gpp   = sd_med(I_GPP),
+      nee   = sd_med(I_NEP, negate = TRUE),
+      rh    = sd_med(I_RH),
+      lai   = rnd(apply(arr[si, , I_LAI], 1, median, na.rm = TRUE), 3)
+    ),
+    daily = list(
+      dates   = dates_d,
+      gpp_med = dd$gpp$med, gpp_lo = dd$gpp$lo, gpp_hi = dd$gpp$hi,
+      nee_med = dd$nee$med, nee_lo = dd$nee$lo, nee_hi = dd$nee$hi,
+      rh_med  = dd$rh$med,  rh_lo  = dd$rh$lo,  rh_hi  = dd$rh$hi,
+      lai_med = dd$lai$med, lai_lo = dd$lai$lo,  lai_hi = dd$lai$hi
+    ),
+    monthly = list(
+      dates = dates_m,
+      gpp   = mo_mean(dd$gpp$med),
+      nee   = mo_mean(dd$nee$med),
+      rh    = mo_mean(dd$rh$med),
+      lai   = mo_mean(dd$lai$med)
+    ),
+    annual = list(
+      year    = run_year,
+      gpp     = s(dd$gpp$med),
+      nee     = s(dd$nee$med),
+      rh      = s(dd$rh$med),
+      lai_avg = rnd(mean(dd$lai$med, na.rm = TRUE), 3)
+    )
+  )
+}
+
+# ─── FLUXNET daily processor ─────────────────────────────────────────────────
+proc_fluxnet <- function(csv_path, site_id, run_year) {
+  cat(sprintf("  FLUXNET [%s] %s...\n", site_id, basename(csv_path)))
+  is_nr1   <- site_id == "US-NR1"
+  nee_col  <- if (is_nr1) "NEE_CUT_REF"     else "NEE_VUT_REF"
+  nee_qc   <- if (is_nr1) "NEE_CUT_REF_QC"  else "NEE_VUT_REF_QC"
+  gpp_col  <- if (is_nr1) "GPP_NT_CUT_REF"  else "GPP_NT_VUT_REF"
+  reco_col <- if (is_nr1) "RECO_NT_CUT_REF" else "RECO_NT_VUT_REF"
+
+  df <- read_csv(csv_path, show_col_types = FALSE) |>
+    mutate(across(where(is.numeric), ~ replace(., . == -9999, NA))) |>
+    mutate(date = as.Date(as.character(DATE))) |>
+    filter(year(date) == run_year)
+
+  # Carbon fluxes: μmol m-2 s-1 × 86400 s/d × 12.011e-6 g/μmol = gC m-2 d-1
+  C  <- UMOL_TO_GC_PER_S * 86400
+  nee  <- rnd(df[[nee_col]]  * C)
+  gpp  <- rnd(df[[gpp_col]]  * C)
+  reco <- rnd(df[[reco_col]] * C)
+  qc   <- df[[nee_qc]]
+
+  # Energy (W m-2), ET from LE (mm d-1)
+  le <- rnd(df[["LE_F_MDS"]], 2)
+  h  <- rnd(df[["H_F_MDS"]],  2)
+  sw <- rnd(df[["SW_IN_F"]],  2)
+  lw <- rnd(df[["LW_IN_F"]],  2)
+  ta <- rnd(df[["TA_F"]],     2)
+  et <- rnd(df[["LE_F_MDS"]] * LE_TO_MM_DAY, 3)
+
+  dates_d <- format(df$date)
+  mo      <- as.integer(format(df$date, "%m"))
+  dates_m <- sprintf("%d-%02d-01", run_year, 1:12)
+  mm      <- function(v) rnd(sapply(1:12, function(m) mean(v[mo == m], na.rm = TRUE)))
+
+  list(
+    daily = list(
+      dates  = dates_d,
+      nee    = nee, gpp = gpp, reco = reco, nee_qc = as.integer(qc),
+      le = le, h = h, sw = sw, lw = lw, et = et, ta = ta
+    ),
+    monthly = list(
+      dates = dates_m,
+      nee   = mm(nee), gpp = mm(gpp), reco = mm(reco),
+      le = mm(le), h = mm(h), et = mm(et)
+    ),
+    annual = list(
+      year = run_year,
+      gpp  = rnd(sum(gpp, na.rm = TRUE), 1),
+      nee  = rnd(sum(nee, na.rm = TRUE), 1)
+    )
+  )
+}
+
+# ─── FLUXCOM monthly processor ───────────────────────────────────────────────
+proc_fluxcom <- function(csv_path) {
+  cat(sprintf("  FLUXCOM %s...\n", basename(csv_path)))
+  df <- read.csv(csv_path, comment.char = "#") |>
+    mutate(date  = as.Date(paste(year, month, "01", sep = "-")),
+           days  = days_in_month(date))
+
+  # Annual: sum(gC m-2 d-1 × days) = gC m-2 yr-1
+  ann <- df |>
+    group_by(year) |>
+    summarise(gpp = rnd(sum(GPP_gC_m2_d * days, na.rm = TRUE), 1),
+              nee = rnd(sum(NEE_gC_m2_d * days, na.rm = TRUE), 1),
+              .groups = "drop")
+
+  list(
+    monthly = list(
+      dates = format(df$date),
+      gpp   = rnd(df$GPP_gC_m2_d),
+      nee   = rnd(df$NEE_gC_m2_d),
+      et    = rnd(df$ET_mm_d),
+      ter   = rnd(df$TER_gC_m2_d)
+    ),
+    annual = list(year = ann$year, gpp = ann$gpp, nee = ann$nee)
+  )
+}
+
+# ─── CMIP6 monthly processor ─────────────────────────────────────────────────
+proc_cmip6 <- function(csv_path, model_name) {
+  cat(sprintf("  CMIP6 [%s] %s...\n", model_name, basename(csv_path)))
+  df <- read_csv(csv_path, show_col_types = FALSE) |>
+    mutate(
+      date = as.Date(paste(year, month, "01", sep = "-")),
+      days = days_in_month(date),
+      gpp  = rnd(gpp_kgC_m2_s  * KGC_S_TO_GC_DAY),
+      rh   = rnd(rh_kgC_m2_s   * KGC_S_TO_GC_DAY),
+      ra   = rnd(ra_kgC_m2_s   * KGC_S_TO_GC_DAY),
+      # NEE = Ra + Rh - GPP (positive = emission)
+      nee  = rnd((ra_kgC_m2_s + rh_kgC_m2_s - gpp_kgC_m2_s) * KGC_S_TO_GC_DAY),
+      lai  = rnd(lai_m2_m2, 3),
+      le   = rnd(latent_heat_W_m2,   2),
+      h    = rnd(sensible_heat_W_m2, 2),
+      sw   = rnd(sw_down_sfc_W_m2,   2),
+      et   = rnd(latent_heat_W_m2 * LE_TO_MM_DAY, 3)
+    )
+
+  scen <- df$scenario[1]
+
+  # Annual aggregates
+  ann <- df |>
+    group_by(year) |>
+    summarise(
+      gpp     = rnd(sum(gpp * days, na.rm = TRUE), 1),
+      nee     = rnd(sum(nee * days, na.rm = TRUE), 1),
+      rh      = rnd(sum(rh  * days, na.rm = TRUE), 1),
+      lai_avg = rnd(mean(lai, na.rm = TRUE), 3),
+      .groups = "drop"
+    )
+
+  list(
+    scenario = scen,
+    monthly  = list(
+      dates = format(df$date),
+      gpp   = df$gpp, nee = df$nee, rh = df$rh,
+      lai   = df$lai, le  = df$le,  h  = df$h,
+      sw    = df$sw,  et  = df$et
+    ),
+    annual = list(year = ann$year, gpp = ann$gpp, nee = ann$nee,
+                  rh = ann$rh, lai_avg = ann$lai_avg)
+  )
+}
+
+# ─── Assemble all data ────────────────────────────────────────────────────────
+cat("Processing data...\n")
+
+all_data <- list(
+  `US-NR1` = list(
+    meta    = list(label = "US-NR1 -- Niwot Ridge, CO (ENF, subalpine)", site = "US-NR1",
+                   nee_note = "NEE_CUT_REF (constant u* threshold; VUT not applied to this site)"),
+    ssem    = proc_ssem(file.path(DATA_DIR, "ssem_usnr1_2008.rds"), 48L, 2008L),
+    fluxnet = proc_fluxnet(file.path(DATA_DIR, "US-NR1", "US-NR1_DD.csv"), "US-NR1", 2008L),
+    fluxcom = proc_fluxcom(file.path(DATA_DIR, "fluxcom", "US-NR1_fluxcom_monthly.csv")),
+    cmip6   = list(
+      CESM2          = proc_cmip6(file.path(DATA_DIR, "cmip6", "CESM2_usnr1_monthly.csv"),          "CESM2"),
+      `IPSL-CM6A-LR` = proc_cmip6(file.path(DATA_DIR, "cmip6", "IPSL-CM6A-LR_usnr1_monthly.csv"),  "IPSL-CM6A-LR"),
+      `UKESM1-0-LL`  = proc_cmip6(file.path(DATA_DIR, "cmip6", "UKESM1-0-LL_usnr1_monthly.csv"),   "UKESM1-0-LL")
+    )
+  ),
+  `US-MMS` = list(
+    meta    = list(label = "US-MMS -- Morgan Monroe State Forest, IN (DBF, temperate)", site = "US-MMS",
+                   nee_note = "NEE_VUT_REF (variable u* threshold method)"),
+    ssem    = proc_ssem(file.path(DATA_DIR, "ssem_usmms_2008.rds"), 24L, 2008L),
+    fluxnet = proc_fluxnet(file.path(DATA_DIR, "US-MMS", "US-MMS_DD.csv"), "US-MMS", 2008L),
+    fluxcom = proc_fluxcom(file.path(DATA_DIR, "fluxcom", "US-MMS_fluxcom_monthly.csv")),
+    cmip6   = list(
+      CESM2          = proc_cmip6(file.path(DATA_DIR, "cmip6", "CESM2_usmms_monthly.csv"),          "CESM2"),
+      `IPSL-CM6A-LR` = proc_cmip6(file.path(DATA_DIR, "cmip6", "IPSL-CM6A-LR_usmms_monthly.csv"),  "IPSL-CM6A-LR"),
+      `UKESM1-0-LL`  = proc_cmip6(file.path(DATA_DIR, "cmip6", "UKESM1-0-LL_usmms_monthly.csv"),   "UKESM1-0-LL")
+    )
+  )
+)
+
+cat("\nSerializing to JSON...\n")
+json_data <- toJSON(all_data, auto_unbox = TRUE, digits = 5, na = "null",
+                    pretty = FALSE, force = TRUE)
+cat(sprintf("  JSON size: %.1f MB\n", nchar(json_data, type="bytes") / 1e6))
+
+# ─── Download / load Plotly.js ────────────────────────────────────────────────
+cat("Loading Plotly.js...\n")
+if (!file.exists(PLOTLY_CACHE) || file.size(PLOTLY_CACHE) < 1e6) {
+  cat("  Downloading Plotly 2.26.2 from CDN...\n")
+  tryCatch(
+    download.file("https://cdn.plot.ly/plotly-2.26.2.min.js",
+                  destfile = PLOTLY_CACHE, quiet = TRUE, mode = "wb"),
+    error = function(e) stop("Failed to download Plotly.js: ", e$message,
+                             "\n  Ensure internet access or pre-cache the file.")
+  )
+  cat(sprintf("  Cached at %s (%.1f MB)\n", PLOTLY_CACHE, file.size(PLOTLY_CACHE)/1e6))
+} else {
+  cat(sprintf("  Using cached %s (%.1f MB)\n", PLOTLY_CACHE, file.size(PLOTLY_CACHE)/1e6))
+}
+plotly_js <- paste(readLines(PLOTLY_CACHE, warn = FALSE), collapse = "\n")
+
+# ─── HTML template ────────────────────────────────────────────────────────────
+cat("Assembling HTML...\n")
+
+css <- '
+:root { --navy:#1a3a5c; --navy-lt:#2c5282; --cream:#f8f9fa; --border:#cdd5df; --txt:#1a202c; --muted:#718096; }
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Georgia,serif;background:var(--cream);color:var(--txt);font-size:14px;line-height:1.4}
+header{background:var(--navy);color:#fff;padding:14px 24px}
+header h1{font-size:17px;font-weight:normal;letter-spacing:.02em}
+.controls{background:#fff;border-bottom:1px solid var(--border);padding:10px 24px;display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end}
+.cg{display:flex;flex-direction:column;gap:4px}
+.cl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+.br{display:flex;gap:3px}
+.btn{border:1px solid var(--border);background:#fff;padding:4px 10px;cursor:pointer;font-size:12px;border-radius:3px;font-family:Georgia,serif}
+.btn.on{background:var(--navy);color:#fff;border-color:var(--navy)}
+.btn:hover:not(.on){background:#edf2f7}
+select{border:1px solid var(--border);padding:5px 8px;font-size:13px;border-radius:3px;font-family:Georgia,serif}
+.wrap{display:flex}
+.sidebar{width:190px;min-width:190px;background:#fff;border-right:1px solid var(--border);padding:12px 14px;flex-shrink:0}
+.sidebar h3{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px}
+.cbl{display:flex;align-items:center;gap:6px;margin:5px 0;font-size:12px;cursor:pointer;user-select:none}
+.cbl input{cursor:pointer}
+.dot{width:11px;height:11px;border-radius:50%;flex-shrink:0}
+#plotDiv{flex:1;min-height:450px}
+.statsbar{background:#fff;border-top:1px solid var(--border);padding:10px 20px;display:flex;flex-wrap:wrap;gap:24px;align-items:center}
+.stat .sl{font-size:10px;color:var(--muted);text-transform:uppercase}
+.stat .sv{font-size:16px;font-weight:bold;color:var(--navy)}
+.docs{margin:14px 20px 20px;background:#fff;border:1px solid var(--border);border-radius:4px}
+.dh{padding:10px 16px;cursor:pointer;display:flex;justify-content:space-between;font-size:13px;font-weight:bold;color:var(--navy)}
+.dh:hover{background:#edf2f7}
+.db{padding:0 16px 16px;display:none;font-size:12px;line-height:1.6}
+.db.open{display:block}
+.db table{border-collapse:collapse;width:100%;margin:8px 0;font-size:11px}
+.db td,.db th{border:1px solid var(--border);padding:5px 8px;vertical-align:top}
+.db th{background:#edf2f7;font-weight:bold}
+.cav{background:#fff8e1;border-left:3px solid #f6ad55;padding:6px 10px;margin:8px 0;border-radius:2px;font-size:11px}
+footer{text-align:center;font-size:11px;color:var(--muted);padding:10px;border-top:1px solid var(--border)}
+'
+
+js_app <- '
+const DATA = __JSON__;
+
+const C = {
+  ssem:"#1a3a5c", fluxnet:"#c0392b", fluxcom:"#e67e22",
+  cesm2:"#27ae60", ipsl:"#8e44ad", ukesm:"#2980b9",
+  sw:"#e67e22", lw:"#a04000", le:"#2980b9", h_:"#c0392b"
+};
+
+const VARS = {
+  NEE:    {field:"nee",  ylab:"NEE (gC m-2 d-1)",  ylab_sd:"NEE (umol CO2 m-2 s-1)",  streams:["ssem","fluxnet","fluxcom","cmip6"]},
+  GPP:    {field:"gpp",  ylab:"GPP (gC m-2 d-1)",  ylab_sd:"GPP (umol CO2 m-2 s-1)",  streams:["ssem","fluxnet","fluxcom","cmip6"]},
+  Rh:     {field:"rh",   ylab:"Rh (gC m-2 d-1)",   ylab_sd:"Rh (umol CO2 m-2 s-1)",   streams:["ssem","cmip6"]},
+  LAI:    {field:"lai",  ylab:"LAI (m2 m-2)",       ylab_sd:"LAI (m2 m-2)",             streams:["ssem","cmip6"]},
+  ET:     {field:"et",   ylab:"ET (mm d-1)",         ylab_sd:null,                       streams:["fluxnet","fluxcom","cmip6"]},
+  Energy: {field:null,   ylab:"Energy (W m-2)",      ylab_sd:null,                       streams:["fluxnet","cmip6"]}
+};
+
+let site="US-NR1", vari="NEE", ts="daily";
+
+function setSite(s) {
+  site = s;
+  document.querySelectorAll("#siteBtns .btn").forEach(b =>
+    b.classList.toggle("on", b.dataset.s === s));
+  document.getElementById("siteLabel").textContent = DATA[s].meta.label;
+  update();
+}
+
+function setVar(v) { vari = v; update(); }
+
+function setTS(t) {
+  ts = t;
+  document.querySelectorAll("#tsBtns .btn").forEach(b =>
+    b.classList.toggle("on", b.dataset.t === t));
+  update();
+}
+
+function cb(id) { const el = document.getElementById(id); return el && el.checked; }
+
+/* ── Trace builders ──────────────────────────────────────────────────────── */
+function ribbon(x, med, lo, hi, name, col) {
+  return [
+    {x: x.concat(x.slice().reverse()),
+     y: hi.concat(lo.slice().reverse()),
+     fill:"toself", fillcolor:col+"28", line:{width:0},
+     type:"scatter", mode:"lines", showlegend:false, hoverinfo:"skip", name:name+" CI"},
+    {x, y:med, type:"scatter", mode:"lines",
+     line:{color:col, width:2}, name:name}
+  ];
+}
+
+function scatter_pts(x, y, col, name, size) {
+  return {x, y, type:"scatter", mode:"markers",
+    marker:{color:col, size:size||4, opacity:0.75}, name};
+}
+
+function line_trace(x, y, col, name, dash, width) {
+  return {x, y, type:"scatter", mode:"lines",
+    line:{color:col, width:width||1.5, dash:dash||"solid"}, name};
+}
+
+function lm_trace(x, y, col, name, dash) {
+  return {x, y, type:"scatter", mode:"lines+markers",
+    line:{color:col, width:2, dash:dash||"solid"}, marker:{size:6}, name};
+}
+
+/* ── Main trace builder ──────────────────────────────────────────────────── */
+function getTraces() {
+  const d  = DATA[site];
+  const vc = VARS[vari];
+  const f  = vc.field;
+  const t  = [];
+
+  if (ts === "subdaily") {
+    if (vc.streams.includes("ssem") && f) {
+      const sd = d.ssem.subdaily;
+      if (cb("cb_ssem_med") && sd[f])
+        t.push(line_trace(sd.dates, sd[f], C.ssem, "SSEM", "solid", 1.5));
+    }
+    return t;
+  }
+
+  if (ts === "daily") {
+    const dd = d.ssem.daily;
+    const fd = d.fluxnet.daily;
+
+    if (vc.streams.includes("ssem") && f && dd[f+"_med"]) {
+      if (cb("cb_ssem_ci"))
+        t.push(...ribbon(dd.dates, dd[f+"_med"], dd[f+"_lo"], dd[f+"_hi"], "SSEM", C.ssem));
+      else if (cb("cb_ssem_med"))
+        t.push(line_trace(dd.dates, dd[f+"_med"], C.ssem, "SSEM"));
+    }
+
+    if (vc.streams.includes("fluxnet") && cb("cb_fluxnet")) {
+      if (f && fd[f] && vari !== "Energy") {
+        const qc = fd.nee_qc || [];
+        const cols = fd[f].map((_,i) => {
+          const q = qc[i];
+          return q===0?"#c0392b":q===1?"#e74c3c":"#f1948a";
+        });
+        t.push({x:fd.dates, y:fd[f], type:"scatter", mode:"markers",
+          marker:{color:cols, size:4, opacity:0.8},
+          name:"FLUXNET (QC: dark=measured)",
+          hovertemplate:"%{y:.3f}<extra></extra>"});
+      }
+      if (vari === "Energy") {
+        [["SW_IN_F","sw",C.sw,"solid"],["LW_IN_F","lw",C.lw,"dot"],
+         ["LE","le",C.le,"dash"],["H","h_",C.h_,"dashdot"]]
+          .forEach(([lbl,fld,col,dash]) => {
+            if (fd[fld.toLowerCase().replace("_in_f","").replace("_f_mds","") in fd
+                   ? fld.toLowerCase().replace("_in_f","").replace("_f_mds","")
+                   : fld === "SW_IN_F" ? "sw" : fld === "LW_IN_F" ? "lw"
+                   : fld === "LE" ? "le" : "h"])
+              return;
+            const key = fld==="SW_IN_F"?"sw":fld==="LW_IN_F"?"lw":fld==="LE"?"le":"h";
+            if (fd[key]) t.push(line_trace(fd.dates, fd[key], col, lbl, dash));
+          });
+      }
+      if (vari === "ET" && fd.et)
+        t.push(scatter_pts(fd.dates, fd.et, C.fluxnet, "FLUXNET LE→ET"));
+    }
+    return t;
+  }
+
+  if (ts === "monthly") {
+    const sm  = d.ssem.monthly;
+    const fm  = d.fluxnet.monthly;
+    const fc  = d.fluxcom.monthly;
+    const cms = d.cmip6;
+
+    if (vc.streams.includes("ssem") && f && sm[f] && cb("cb_ssem_med"))
+      t.push(lm_trace(sm.dates, sm[f], C.ssem, "SSEM 2008"));
+
+    if (vc.streams.includes("fluxnet") && f && fm[f] && cb("cb_fluxnet") && vari!=="Energy")
+      t.push(lm_trace(fm.dates, fm[f], C.fluxnet, "FLUXNET 2008", "dot"));
+
+    if (vc.streams.includes("fluxcom") && f && fc[f] && cb("cb_fluxcom"))
+      t.push(line_trace(fc.dates, fc[f], C.fluxcom, "FLUXCOM 2001-2021", "dash", 1.5));
+
+    [["CESM2","cb_cesm2",C.cesm2,"dot"],
+     ["IPSL-CM6A-LR","cb_ipsl",C.ipsl,"dashdot"],
+     ["UKESM1-0-LL","cb_ukesm",C.ukesm,"longdash"]]
+      .forEach(([m,cbid,col,dash]) => {
+        if (!cb(cbid) || !vc.streams.includes("cmip6")) return;
+        const md = cms[m].monthly;
+        const y  = vari==="Energy" ? md.le : (f ? md[f] : null);
+        if (y) t.push(line_trace(md.dates, y, col, m, dash));
+        if (vari==="Energy" && md.h && cb(cbid))
+          t.push(line_trace(md.dates, md.h, col+"99", m+" H", dash));
+      });
+
+    return t;
+  }
+
+  if (ts === "annual") {
+    const fa  = d.fluxcom.annual;
+    const cms = d.cmip6;
+
+    if (vc.streams.includes("ssem") && f && cb("cb_ssem_med")) {
+      const ann = d.ssem.annual;
+      const val = f==="lai"?ann.lai_avg:ann[f];
+      if (val!=null) t.push({x:["2008"], y:[val], type:"bar",
+        name:"SSEM 2008", marker:{color:C.ssem}});
+    }
+
+    if (vc.streams.includes("fluxnet") && cb("cb_fluxnet")) {
+      const ann_fn = d.fluxnet.annual;
+      const val = f && ann_fn[f];
+      if (val!=null) t.push({x:["2008"], y:[val], type:"bar",
+        name:"FLUXNET 2008", marker:{color:C.fluxnet}});
+    }
+
+    if (vc.streams.includes("fluxcom") && f && fa.year && cb("cb_fluxcom")) {
+      const yv = f==="lai" ? null : fa[f];
+      if (yv) t.push(lm_trace(fa.year.map(String), yv, C.fluxcom, "FLUXCOM"));
+    }
+
+    [["CESM2","cb_cesm2",C.cesm2],
+     ["IPSL-CM6A-LR","cb_ipsl",C.ipsl],
+     ["UKESM1-0-LL","cb_ukesm",C.ukesm]]
+      .forEach(([m,cbid,col]) => {
+        if (!cb(cbid) || !vc.streams.includes("cmip6")) return;
+        const ann = cms[m].annual;
+        const yv  = f==="lai" ? ann.lai_avg : (f ? ann[f] : null);
+        if (yv) t.push(lm_trace(ann.year.map(String), yv, col, m));
+      });
+  }
+
+  return t;
+}
+
+/* ── Layout ──────────────────────────────────────────────────────────────── */
+function getLayout() {
+  const vc = VARS[vari];
+  const isAnn = ts === "annual";
+  const isSd  = ts === "subdaily";
+  const ylab  = isSd ? (vc.ylab_sd || vc.ylab)
+                      : isAnn && vari!=="LAI" && vari!=="Energy"
+                        ? vc.ylab.replace("d-1","yr-1")
+                        : vc.ylab;
+  const optEl = document.getElementById("varSel");
+  const varTxt = optEl ? optEl.options[optEl.selectedIndex].text : vari;
+  return {
+    margin:{l:65,r:20,t:40,b:60},
+    title:{text:site+" -- "+varTxt+" ("+ts+")",
+           font:{size:14,color:"#1a3a5c"}},
+    xaxis:{title:isAnn?"Year":"Date",showgrid:true,gridcolor:"#e2e8f0",zeroline:false},
+    yaxis:{title:ylab,showgrid:true,gridcolor:"#e2e8f0",zeroline:true,zerolinecolor:"#cbd5e0"},
+    legend:{orientation:"h",x:0,y:-0.18,font:{size:11}},
+    plot_bgcolor:"#ffffff", paper_bgcolor:"#ffffff",
+    font:{family:"Georgia, serif",size:12},
+    hovermode:"x unified", barmode:"group"
+  };
+}
+
+/* ── Cost functions ──────────────────────────────────────────────────────── */
+function updateStats() {
+  const f = VARS[vari].field;
+  const na = v => { document.getElementById("val_"+v).textContent="--"; };
+  const set = (v,x) => { document.getElementById("val_"+v).textContent=x; };
+
+  if (!f || !["NEE","GPP"].includes(vari) || ts!=="daily") {
+    ["rmse","bias","r"].forEach(na);
+    set("n_pts","--");
+    return;
+  }
+  const dd = DATA[site].ssem.daily;
+  const fd = DATA[site].fluxnet.daily;
+  const s = dd[f+"_med"], o = fd[f];
+  if (!s || !o) { ["rmse","bias","r"].forEach(na); return; }
+
+  const pairs = [];
+  for (let i=0; i<Math.min(s.length,o.length); i++)
+    if (s[i]!=null && o[i]!=null && !isNaN(s[i]) && !isNaN(o[i]))
+      pairs.push([s[i],o[i]]);
+
+  if (!pairs.length) { ["rmse","bias","r"].forEach(na); return; }
+  const n  = pairs.length;
+  const ms = pairs.reduce((a,p)=>a+p[0],0)/n;
+  const mo = pairs.reduce((a,p)=>a+p[1],0)/n;
+  const rmse = Math.sqrt(pairs.reduce((a,p)=>a+Math.pow(p[0]-p[1],2),0)/n);
+  const bias = ms-mo;
+  const ss = pairs.reduce((a,p)=>a+(p[0]-ms)*(p[1]-mo),0);
+  const vs = Math.sqrt(pairs.reduce((a,p)=>a+Math.pow(p[0]-ms,2),0));
+  const vo = Math.sqrt(pairs.reduce((a,p)=>a+Math.pow(p[1]-mo,2),0));
+  const r  = vs>0&&vo>0 ? ss/(vs*vo) : NaN;
+
+  set("n_pts", n);
+  set("rmse", rmse.toFixed(3)+" gC m-2 d-1");
+  set("bias", (bias>=0?"+":"")+bias.toFixed(3)+" gC m-2 d-1");
+  set("r",    isNaN(r)?"--":r.toFixed(3));
+}
+
+/* ── Update ──────────────────────────────────────────────────────────────── */
+function update() {
+  Plotly.react("plotDiv", getTraces(), getLayout(), {responsive:true, displaylogo:false});
+  updateStats();
+}
+
+function toggleDocs() {
+  const b = document.getElementById("docsBody");
+  const a = document.getElementById("darrow");
+  const o = b.classList.toggle("open");
+  a.textContent = o ? "\\u25BC" : "\\u25BA";
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+document.getElementById("siteLabel").textContent = DATA["US-NR1"].meta.label;
+update();
+'
+
+build_date   <- format(Sys.time(), "%Y-%m-%d %H:%M")
+js_with_data <- gsub("__JSON__", json_data, js_app, fixed = TRUE)
+
+html_head <- paste0(
+'<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>FluxCourseForecast 2026 -- Model-Data Comparison Dashboard</title>
+<style>',
+css,
+'</style>
+</head>
+<body>
+<header>
+  <h1>FluxCourseForecast 2026 -- Model-Data Comparison Dashboard</h1>
+</header>'
+)
+
+html_controls <- '
+<div class="controls">
+  <div class="cg">
+    <span class="cl">Site</span>
+    <div class="br" id="siteBtns">
+      <button class="btn on" data-s="US-NR1" onclick="setSite(\'US-NR1\')">US-NR1</button>
+      <button class="btn"    data-s="US-MMS" onclick="setSite(\'US-MMS\')">US-MMS</button>
+    </div>
+  </div>
+  <div class="cg">
+    <span class="cl">Variable</span>
+    <select id="varSel" onchange="setVar(this.value)">
+      <option value="NEE">NEE (net ecosystem exchange)</option>
+      <option value="GPP">GPP (gross primary production)</option>
+      <option value="Rh">Rh (heterotrophic respiration)</option>
+      <option value="LAI">LAI (leaf area index)</option>
+      <option value="ET">ET (evapotranspiration)</option>
+      <option value="Energy">Energy balance (SW, LW, LE, H)</option>
+    </select>
+  </div>
+  <div class="cg">
+    <span class="cl">Timescale</span>
+    <div class="br" id="tsBtns">
+      <button class="btn"    data-t="subdaily" onclick="setTS(\'subdaily\')">Sub-daily</button>
+      <button class="btn on" data-t="daily"    onclick="setTS(\'daily\')">Daily</button>
+      <button class="btn"    data-t="monthly"  onclick="setTS(\'monthly\')">Monthly</button>
+      <button class="btn"    data-t="annual"   onclick="setTS(\'annual\')">Annual</button>
+    </div>
+  </div>
+  <div class="cg" style="margin-left:auto">
+    <span class="cl">Selected site</span>
+    <span id="siteLabel" style="font-size:12px;font-weight:bold;color:#1a3a5c;max-width:320px"></span>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="sidebar">
+    <h3>Data Streams</h3>
+    <label class="cbl">
+      <input type="checkbox" id="cb_ssem_med" checked onchange="update()">
+      <span class="dot" style="background:#1a3a5c"></span>SSEM median
+    </label>
+    <label class="cbl">
+      <input type="checkbox" id="cb_ssem_ci" checked onchange="update()">
+      <span class="dot" style="background:#1a3a5c;opacity:.25"></span>SSEM 95% CI
+    </label>
+    <label class="cbl">
+      <input type="checkbox" id="cb_fluxnet" checked onchange="update()">
+      <span class="dot" style="background:#c0392b"></span>FLUXNET obs
+    </label>
+    <label class="cbl">
+      <input type="checkbox" id="cb_fluxcom" checked onchange="update()">
+      <span class="dot" style="background:#e67e22"></span>FLUXCOM (0.5&deg;)
+    </label>
+    <label class="cbl">
+      <input type="checkbox" id="cb_cesm2" checked onchange="update()">
+      <span class="dot" style="background:#27ae60"></span>CMIP6 CESM2
+    </label>
+    <label class="cbl">
+      <input type="checkbox" id="cb_ipsl" checked onchange="update()">
+      <span class="dot" style="background:#8e44ad"></span>CMIP6 IPSL
+    </label>
+    <label class="cbl">
+      <input type="checkbox" id="cb_ukesm" checked onchange="update()">
+      <span class="dot" style="background:#2980b9"></span>CMIP6 UKESM
+    </label>
+  </div>
+  <div id="plotDiv"></div>
+</div>
+
+<div class="statsbar">
+  <span style="font-size:11px;color:#718096">SSEM vs FLUXNET daily 2008 (n=<span id="n_pts">--</span>; NEE and GPP only)</span>
+  <div class="stat"><div class="sl">RMSE</div><div class="sv" id="val_rmse">--</div></div>
+  <div class="stat"><div class="sl">Bias (SSEM minus obs)</div><div class="sv" id="val_bias">--</div></div>
+  <div class="stat"><div class="sl">Pearson r</div><div class="sv" id="val_r">--</div></div>
+</div>'
+
+html_docs <- '
+<div class="docs">
+  <div class="dh" onclick="toggleDocs()">
+    Data Stream Reference and Caveats
+    <span id="darrow">&#9658;</span>
+  </div>
+  <div class="db" id="docsBody">
+    <table>
+      <tr><th>Stream</th><th>Source</th><th>Temporal res.</th><th>Spatial scale</th><th>Units (dashboard)</th><th>Available variables</th></tr>
+      <tr><td>SSEM median / CI</td><td>Super Simple Ecosystem Model (Dietze lab)</td><td>Sub-daily; aggregated to daily / monthly / annual</td><td>Point (forest stand, ~1 ha)</td><td>gC m-2 d-1 (daily+); umol m-2 s-1 (sub-daily)</td><td>GPP, NEE, Rh, LAI</td></tr>
+      <tr><td>FLUXNET obs</td><td>AmeriFlux FLUXNET product: US-NR1 and US-MMS</td><td>Daily (DD product)</td><td>Tower footprint (~0.5-2 km2)</td><td>gC m-2 d-1 (C fluxes); W m-2 (energy); mm d-1 (ET)</td><td>NEE, GPP, RECO, LE, H, SW_IN, LW_IN, ET</td></tr>
+      <tr><td>FLUXCOM</td><td>FLUXCOM-X-BASE (Nelson et al. 2024, Biogeosciences)</td><td>Monthly (2001-2021)</td><td>0.5 deg grid cell (~50 km)</td><td>gC m-2 d-1 (mean daily rate for month)</td><td>GPP, NEE, TER, ET</td></tr>
+      <tr><td>CMIP6 CESM2</td><td>CESM2 (NCAR), Pangeo CMIP6 cloud archive</td><td>Monthly (1980-2021)</td><td>~1 deg grid cell (~100 km)</td><td>gC m-2 d-1 (mean daily rate); W m-2 (energy)</td><td>GPP, Rh, NEE, LAI, LE, H, ET</td></tr>
+      <tr><td>CMIP6 IPSL-CM6A-LR</td><td>IPSL-CM6A-LR (IPSL), Pangeo CMIP6 cloud archive</td><td>Monthly</td><td>~1 deg grid cell</td><td>same as CESM2</td><td>same as CESM2</td></tr>
+      <tr><td>UKESM1-0-LL</td><td>UKESM1-0-LL (MOHC), Pangeo CMIP6 cloud archive</td><td>Monthly (historical ends ~2014)</td><td>~1 deg grid cell</td><td>same as CESM2</td><td>same as CESM2</td></tr>
+    </table>
+    <div class="cav"><strong>CESM2 scenario:</strong> SSP3-7.0 (ssp370) was used for CESM2 instead of SSP2-4.5 because the SSP2-4.5 run for the US-MMS grid cell was unavailable at time of extraction. Future-period CESM2 projections use a higher-emissions pathway than the other models.</div>
+    <div class="cav"><strong>UKESM1-0-LL:</strong> Only historical output (ending approximately 2014) is present in the pre-extracted CSVs. Future-period months are absent. This is a data-availability limitation, not a model property.</div>
+    <div class="cav"><strong>US-NR1 NEE:</strong> NEE_CUT_REF (constant u* threshold method) is used instead of NEE_VUT_REF because the variable u* method was not applied to this site in the provided data product. GPP and RECO use the corresponding CUT nighttime-partitioning method.</div>
+    <div class="cav"><strong>Spatial scale hierarchy:</strong> SSEM simulates one forest stand (tower footprint, sub-km). FLUXCOM integrates machine-learning estimates across a 0.5 deg cell (~50 km). CMIP6 models integrate across ~1 deg (~100 km). Absolute magnitude differences between streams partly reflect this spatial aggregation, not only model error.</div>
+    <div class="cav"><strong>CMIP6 NEE derivation:</strong> CMIP6 does not directly output NEE at the required spatial scale. NEE shown here is computed as Ra + Rh - GPP from model output, which equals -NEP. This approximation neglects land-use change fluxes and lateral carbon transport included in the model\'s NBP variable.</div>
+    <div class="cav"><strong>Sub-daily display:</strong> US-NR1 is half-hourly (30 min); US-MMS is hourly (60 min). Sub-daily SSEM output is thinned to every 4th timestep (2-hourly for NR1, 4-hourly for MMS) and shown as instantaneous flux rates (umol m-2 s-1), not daily-integrated values.</div>
+    <p style="margin-top:10px;font-size:11px;color:#718096">
+      SSEM code: Dietze lab, BU (mdietze/FluxCourseForecast). FLUXNET data: CC-BY-4.0, AmeriFlux network.
+      FLUXCOM data: Nelson et al. (2024), doi:10.18160/5NZG-JMJE, CCBY4.
+      CMIP6 data: respective modelling groups, PCMDI/CMIP6 terms of use.
+    </p>
+  </div>
+</div>'
+
+html_body <- paste0(
+  html_head,
+  html_controls,
+  html_docs,
+  "\n<footer>FluxCourseForecast 2026 &mdash; Bloomington, Indiana &mdash; built ", build_date, "</footer>\n\n",
+  "<script>\n", plotly_js, "\n</script>\n",
+  "<script>\n", js_with_data, "\n</script>\n",
+  "</body>\n</html>\n"
+)
+
+# ─── Write output ─────────────────────────────────────────────────────────────
+writeLines(html_body, OUT_HTML)
+sz_mb <- file.size(OUT_HTML) / 1e6
+cat(sprintf("\nOutput: %s (%.1f MB)\n", OUT_HTML, sz_mb))
+if (sz_mb > 20) {
+  cat("WARNING: file exceeds 20 MB — may be large for distribution.\n")
+} else {
+  cat("File size is within the 20 MB distribution limit.\n")
+}
+cat("Done.\n")

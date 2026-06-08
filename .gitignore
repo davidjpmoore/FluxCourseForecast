@@ -68,3 +68,6 @@ exercises/*_files/
 # FLUXCOM raw downloads — large NetCDF files, obtained from https://doi.org/10.18160/5NZG-JMJE
 # Extracted site CSVs (data/fluxcom/*.csv) are small and git-tracked, like data/cmip6/*.csv
 data/fluxcom/raw/
+
+# Plotly.js local cache — downloaded once by build_dashboard.R, not committed (3.6 MB)
+exercises/.plotly.min.js
