@@ -50,3 +50,22 @@ Auto-updated by Claude Code. Each entry records a task completion.
 - CMIP6 pre-extracted for US-MMS grid cell only; US-NR1 extraction pending
 - CESM2 uses SSP370 not SSP245 in the pre-extracted CMIP6 CSVs (documented in data/cmip6/)
 - UKESM1-0-LL historical only through 2014 (documented in data/cmip6/)
+
+## [2026-06-08] Task: Verify student data completeness and create test_student_setup.R
+
+### Task 1: Student data verification
+- Confirmed all 13 required files present in exercises/student_data/Tuesday_AM_SSEM_part1/
+- R source files (functions.R, utils.R) verified identical to repo versions
+- Rebuilt Tuesday_AM_SSEM_part1.zip: 0.73 GB compressed, 2.3 GB uncompressed, 20 entries
+- Copied to Google Drive: ~/Library/CloudStorage/GoogleDrive-setanta.research@gmail.com/My Drive/FLUXCOURSE 2026 Shared Resources/Week 2 Instructional Materials/Tuesday_AM_SSEM_part1.zip (734285218 bytes, 2026-06-08 12:01)
+
+### Task 2: Create exercises/test_student_setup.R
+- Created student self-check script with 5 sections:
+  1. data_dir existence check (early exit with clear message if missing)
+  2. PASS/FAIL for all 13 required files (checks existence and size > 1 kB)
+  3. Package check: tidyverse, lubridate, rmarkdown, compiler, mvtnorm
+  4. Source functions.R and utils.R with error capture
+  5. Smoke test: load 48 rows of US-NR1_HR.csv, run ensemble_forecast(ne=5, 48 timesteps),
+     verify dim == c(48,5,12); prints GPP median at midday as a sanity value
+- Final summary: "READY TO START — all N checks passed" or count + contact info
+- Local test run result: all 22 checks PASS; GPP median at step 24 = 10.673 umol CO2 m-2 s-1
