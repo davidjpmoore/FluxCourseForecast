@@ -135,3 +135,24 @@ Auto-updated by Claude Code. Each entry records a task completion.
 ### Knit environment note
 - Pandoc not in shell PATH; used /Applications/RStudio.app/Contents/Resources/app/quarto/bin/tools/aarch64/pandoc (v3.8.3)
 - renv out-of-sync warning is non-blocking (packages installed but not recorded in lockfile)
+
+## [2026-06-08] Task 1–2: Create install_packages.R and SETUP_INSTRUCTIONS.md
+
+### Task 1: exercises/install_packages.R
+- Scanned all three exercise Rmds, R/functions.R, R/utils.R for library(), require(), and :: namespace calls
+- Required packages (CRAN): tidyverse, lubridate, rmarkdown, mvtnorm, coda
+  - compiler is base R (always present, excluded from install list)
+  - coda found via coda:::as.mcmc in R/utils.R (mat2mcmc.list function)
+  - mvtnorm found via mvtnorm::rmvnorm in R/functions.R (particle filter)
+- Script uses plain install.packages() only (no renv, pak, or non-base tools)
+- Ends with verification loop and stop() if any package fails
+
+### Task 2: exercises/SETUP_INSTRUCTIONS.md
+- One-page guide for graduate students with numbered steps
+- Covers: GitHub clone/download, Google Drive data zip, data_dir setting, install_packages.R, test_student_setup.R
+- Contact info: davidjpmoore@arizona.edu
+- Instructed students to copy test_student_setup.R console output when requesting help
+
+### Staging folder
+- Copied install_packages.R and SETUP_INSTRUCTIONS.md to exercises/student_data/Tuesday_AM_SSEM_part1/
+- Zip NOT rebuilt per instructions
