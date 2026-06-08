@@ -109,3 +109,29 @@ Auto-updated by Claude Code. Each entry records a task completion.
 ### Gitignore fix
 - Removed data/fluxcom/*.csv from .gitignore (small extracted site CSVs, tracked like data/cmip6/*.csv)
 - data/fluxcom/raw/ remains gitignored
+
+## [2026-06-08] Knit all three exercises and rebuild student zip
+
+### Exercise 01 — 01_run_model.Rmd
+- Status: CLEAN — 17/17 chunks, no errors, no warnings
+- Output: exercises/01_run_model.html, 3.7 MB
+
+### Exercise 02 — 02_validation.Rmd
+- Status: CLEAN after one minor fix — 21/21 chunks, no warnings
+- Fix applied: fluxcom_compare chunk used `ssem_info_local` (a list from build_ssem_daily())
+  directly with summarise() instead of `ssem_daily |> filter(site == site_id)`;
+  also referenced nonexistent column `gpp_gCm2d` instead of `gpp_med`
+- Output: exercises/02_validation.html, 4.1 MB
+
+### Exercise 03 — 03_handoff.Rmd
+- Status: CLEAN — 18/18 chunks, no errors, no warnings
+- Output: exercises/03_handoff.html, 1.2 MB
+
+### Student zip rebuild
+- Staging folder: 26 files (cmip6 × 12, fluxcom × 4, R × 2, US-NR1 × 2, US-MMS × 2, DE-Tha × 2, DK-Sor × 2)
+- Zip: exercises/student_data/Tuesday_AM_SSEM_part1.zip, 701 MB (deflated ~66% from ~2.3 GB)
+- Google Drive upload confirmed: ~/Library/CloudStorage/GoogleDrive-setanta.research@gmail.com/My Drive/FLUXCOURSE 2026 Shared Resources/Week 2 Instructional Materials/Tuesday_AM_SSEM_part1.zip (701 MB, 2026-06-08 13:11)
+
+### Knit environment note
+- Pandoc not in shell PATH; used /Applications/RStudio.app/Contents/Resources/app/quarto/bin/tools/aarch64/pandoc (v3.8.3)
+- renv out-of-sync warning is non-blocking (packages installed but not recorded in lockfile)

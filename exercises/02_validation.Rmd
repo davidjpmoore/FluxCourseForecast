@@ -950,18 +950,17 @@ bind_rows(cmip6_long, obs_long) |>
 
 annual_gpp_list <- list()
 
-# SSEM annual GPP (gC m-2 yr-1): sum daily median GPP over the run year
+# SSEM annual GPP (gC m-2 yr-1): sum daily median GPP over the run year.
+# ssem_daily is the combined tibble (from the harmonise chunk) with site,
+# date, gpp_med (gC m-2 d-1); summing gives annual gC m-2 yr-1 for the run year.
 for (site_id in c("US-NR1", "US-MMS")) {
-  ssem_info_local <- if (site_id == "US-NR1") nr1_ssem else mms_ssem
-  # nr1_ssem / mms_ssem are the output of build_ssem_daily() from the
-  # harmonise chunk — they have columns date and gpp_gCm2d (median daily GPP)
-  if (!is.null(ssem_info_local)) {
-    annual_gpp_list[[paste0("SSEM_", site_id)]] <- ssem_info_local |>
-      dplyr::summarise(
-        source  = paste("SSEM", site_id),
-        gpp_ann = sum(gpp_gCm2d, na.rm = TRUE)
-      )
-  }
+  ann <- ssem_daily |>
+    dplyr::filter(site == site_id) |>
+    dplyr::summarise(
+      source  = paste("SSEM", site_id),
+      gpp_ann = sum(gpp_med, na.rm = TRUE)
+    )
+  annual_gpp_list[[paste0("SSEM_", site_id)]] <- ann
 }
 
 # FLUXCOM annual GPP (gC m-2 yr-1): sum of monthly (gC m-2 d-1) × days-in-month
