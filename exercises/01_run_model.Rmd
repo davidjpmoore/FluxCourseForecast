@@ -38,16 +38,28 @@ of carbon can be traced from a single equation to a plotted output, SSEM is
 ideal for developing a rigorous intuition for what process-based models actually
 compute — and for diagnosing what goes wrong when they fail.
 
-In this exercise you will run SSEM at the Tharandt spruce forest in Saxony,
-Germany (FLUXNET site DE-Tha) for one calendar year, using only measured
-shortwave radiation and air temperature as meteorological drivers. You will
-examine the seasonal structure of the model output — GPP, net ecosystem
-production (NEP), and carbon pool trajectories — and begin the core practice of
-model evaluation: asking whether the output is physically plausible, and
-identifying what observations would be required to answer that question more
-rigorously. You are not yet comparing against observations; that is Exercise 02.
-The goal here is to build a clear mental picture of what SSEM simulates and
-what it deliberately ignores.
+In this exercise you will run SSEM at **two temperate forest sites** for
+calendar year 2008, using only measured shortwave radiation and air temperature
+as meteorological drivers:
+
+- **US-NR1** (Niwot Ridge, Colorado) — a subalpine evergreen needleleaf forest
+  (ENF) dominated by subalpine fir, Engelmann spruce, and lodgepole pine at
+  3,050 m elevation. Continuous AmeriFlux measurements since 1998. ENF sites
+  maintain their foliage year-round; the seasonal carbon cycle is driven
+  primarily by temperature and snowpack rather than leaf-on/leaf-off phenology.
+
+- **US-MMS** (Morgan Monroe State Forest, Indiana) — a temperate deciduous
+  broadleaf forest (DBF) in the Midwest, dominated by sugar maple, tulip
+  poplar, and white oak. You visited this site on Friday. DBF sites have
+  near-zero carbon uptake in winter and a sharp spring green-up driven by
+  photoperiod and temperature.
+
+Comparing ENF and DBF is the central goal of this exercise. By running the same
+model structure at both sites with vegetation-type-appropriate parameters, you
+can see which aspects of the carbon cycle SSEM captures across forest types —
+and which it cannot. You are not yet comparing against observations; that is
+Exercise 02. The goal here is to build a clear mental picture of what SSEM
+simulates and what it deliberately ignores.
 
 ---
 
@@ -98,44 +110,50 @@ source(file.path(code_dir, "utils.R"))
 
 ---
 
-## Load and inspect drivers
+## Load and inspect drivers — US-NR1 (ENF, subalpine)
 
-```{r drivers, message=FALSE, fig.width=10, fig.height=6, fig.cap="Half-hourly PAR and air temperature at DE-Tha during 2000. Each vertical spike in PAR is one day's sunlight; the seasonal envelope shows peak insolation in June–July. Temperature drops below zero during winter."}
+```{r drivers_nr1, message=FALSE, fig.width=10, fig.height=6, fig.cap="Half-hourly PAR and air temperature at US-NR1 during 2008. The high-elevation site shows a compressed growing season compared with lower-elevation forests; nighttime temperatures drop well below zero even in summer."}
 
-# ── Read the DE-Tha site data ─────────────────────────────────────────────────
-# DE-Tha is a managed Norway spruce plantation (Picea abies) in Tharandt,
-# Saxony, Germany. It has been a continuous FLUXNET site since 1996, making
-# it one of the longest eddy covariance records in Europe. The _HH suffix
-# denotes the half-hourly (HH) product: one row per 30-minute period.
-drivers_raw <- read_csv(
-  file.path(data_dir, "DE-Tha", "DE-Tha_HH.csv"),
+# ── Read the US-NR1 site data ─────────────────────────────────────────────────
+# US-NR1 is a subalpine evergreen needleleaf forest at Niwot Ridge, Colorado
+# (3,050 m elevation), dominated by subalpine fir (Abies lasiocarpa), Engelmann
+# spruce (Picea engelmannii), and lodgepole pine (Pinus contorta).  Continuous
+# AmeriFlux tower measurements have been made since 1998.
+#
+# The _HR_ suffix denotes the AmeriFlux half-hourly product: one row per
+# 30-minute period, 48 rows per calendar day.  Despite the "HR" (hourly) label
+# in the filename convention, the data are half-hourly — the naming follows the
+# AmeriFlux v1.3 data product convention.  The timestamp column is DATETIME_START
+# in ISO 8601 format (same as the European FLUXNET sites DE-Tha and DK-Sor).
+nr1_raw <- read_csv(
+  file.path(data_dir, "US-NR1", "US-NR1_HR.csv"),
   show_col_types = FALSE
 )
 
 # FLUXNET uses -9999 as a sentinel for missing observations (not the same as
 # a true zero). Replace these with NA so R treats them as missing data rather
 # than including them in calculations.
-drivers_raw <- drivers_raw |>
+nr1_raw <- nr1_raw |>
   mutate(across(where(is.numeric), \(x) replace(x, x == -9999, NA)))
 
-# ── Filter to one calendar year ───────────────────────────────────────────────
-# We use the year 2000: a meteorologically representative year for this site
-# with no major disturbance events, giving a clean seasonal cycle to study.
-# Year 2000 is a leap year (366 days × 48 half-hour periods = 17,568 rows).
-# After you have worked through this exercise, try a different year and
-# compare the shape of the model output — interannual variability is real and
-# the model will reflect the variability in the drivers.
-drivers <- drivers_raw |>
+# ── Filter to calendar year 2008 ──────────────────────────────────────────────
+# Year 2008 is a clean mid-record year at US-NR1 with good data coverage and
+# no major disturbance events, giving a representative seasonal cycle.
+# 2008 is a leap year: 366 days × 48 half-hour periods = 17,568 rows.
+drivers_nr1 <- nr1_raw |>
   mutate(
-    # Parse the ISO 8601 timestamp. The trailing "Z" indicates UTC;
-    # ymd_hms() handles this automatically.
-    datetime = ymd_hms(DATETIME_START)
+    # readr auto-parses DATETIME_START as POSIXct (it recognises the ISO 8601
+    # format).  Using the column directly — without ymd_hms() re-parsing — is
+    # the correct approach; calling ymd_hms() on a POSIXct column triggers an
+    # internal as.character() round-trip that drops ~366 timestamps per year.
+    datetime = DATETIME_START
   ) |>
-  filter(year(datetime) == 2000) |>
+  filter(year(datetime) == 2008) |>
   select(datetime, SW_IN_F, TA_F)
 
-# Confirm the expected row count. A leap year has 366 × 48 = 17,568 rows.
-cat("Timesteps in 2000:", nrow(drivers), "(expect 17,568 for a leap year)\n")
+# Confirm the expected row count: 366 days × 48 steps = 17,568 for a leap year.
+cat("US-NR1 timesteps in 2008:", nrow(drivers_nr1),
+    "(expect 17,568 for a leap year)\n")
 
 # ── Convert to model input units ──────────────────────────────────────────────
 # SSEM's photosynthesis routine expects exactly two driver columns:
@@ -150,61 +168,14 @@ cat("Timesteps in 2000:", nrow(drivers), "(expect 17,568 for a leap year)\n")
 # due to calibration drift; the model does not allow negative PAR.
 #
 # TA_F is gap-filled air temperature already in °C — no unit conversion needed.
-drivers <- drivers |>
+drivers_nr1 <- drivers_nr1 |>
   mutate(
     PAR  = pmax(SW_IN_F * 2.1, 0),
     temp = TA_F
   )
 
-# ┌─────────────────────────────────────────────────────────────────────────────┐
-# │  TIMESTEP NOTE — important if you switch sites                              │
-# │                                                                             │
-# │  DE-Tha (this script) and DK-Sor both use the FLUXNET "_HH_" half-hourly  │
-# │  product: one row every 30 minutes → 48 rows per calendar day.             │
-# │                                                                             │
-# │  US-MMS uses the AmeriFlux "_HR_" hourly product (see the note at the      │
-# │  bottom of this chunk): one row per hour → 24 rows per calendar day.       │
-# │                                                                             │
-# │  SSEM itself has no fixed timestep requirement — it loops over whatever    │
-# │  rows you supply. But the number of rows per day affects two things:       │
-# │                                                                             │
-# │  1. The x-axis of plot_forecast() counts timestep numbers, not dates.      │
-# │     For DE-Tha, step 48 = end of day 1; for US-MMS it would be step 24.   │
-# │                                                                             │
-# │  2. In Exercise 02, converting model output from μmol m⁻² s⁻¹ (a rate)   │
-# │     to gC m⁻² day⁻¹ (a daily total) requires multiplying by the step      │
-# │     length in seconds: 1800 s for 30-min sites, 3600 s for hourly sites.  │
-# │     Using the wrong value introduces a factor-of-two error in daily totals │
-# │     for US-MMS — easy to miss, hard to diagnose in a plot.                │
-# │                                                                             │
-# │  If you switch to US-MMS or DK-Sor data: (a) replace the file path above, │
-# │  (b) update the expected-row-count comment (17,568 → 8,784 for US-MMS in  │
-# │  a leap year), and (c) pass the correct step length to the unit conversion │
-# │  in Exercise 02 via the site_timestep list defined in Chunk 1 of that Rmd. │
-# └─────────────────────────────────────────────────────────────────────────────┘
-
-# ── What does SSEM ignore? ────────────────────────────────────────────────────
-# PAR and temperature are sufficient to drive SSEM's two central equations:
-#   GPP = α × (1 − exp(−0.5 × LAI)) × PAR       [light use efficiency model]
-#   Rh  = Rbasal × BSOM × Q10^(temp / 10)        [Q10 soil decomposition model]
-#
-# A full LSM would also require:
-#   • Precipitation / soil moisture  — drought limits stomatal conductance and
-#     slows decomposition; SSEM cannot simulate any water stress.
-#   • Vapour pressure deficit (VPD)  — high VPD closes stomata, reducing GPP;
-#     SSEM's LUE is a fixed parameter, not a VPD-responsive one.
-#   • Leaf nitrogen / Vcmax          — N availability sets the photosynthetic
-#     capacity; SSEM lumps this entirely into the α parameter.
-#   • Phenology (budburst, leaf-off) — SSEM keeps Bleaf roughly constant;
-#     there is no spring green-up or autumn senescence signal.
-# You will see the consequences of these omissions when you compare the output
-# against observations in Exercise 02.
-
-# ── Plot the drivers ──────────────────────────────────────────────────────────
-# Plotting the raw half-hourly data (rather than daily means) shows the diurnal
-# cycle embedded within the seasonal trend — both matter for model behaviour
-# because SSEM calculates GPP every 30 minutes.
-drivers |>
+# ── Plot the US-NR1 drivers ───────────────────────────────────────────────────
+drivers_nr1 |>
   select(datetime, PAR, temp) |>
   pivot_longer(
     cols      = c(PAR, temp),
@@ -212,7 +183,6 @@ drivers |>
     values_to = "value"
   ) |>
   mutate(
-    # Create human-readable labels for the facet panels.
     label = case_when(
       variable == "PAR"  ~ "PAR (μmol photon m⁻² s⁻¹)",
       variable == "temp" ~ "Air temperature (°C)"
@@ -220,11 +190,9 @@ drivers |>
   ) |>
   ggplot(aes(x = datetime, y = value)) +
     geom_line(linewidth = 0.1, alpha = 0.35, colour = "grey20") +
-    # Free y-axis scales because PAR and temperature are on completely
-    # different scales; a shared axis would compress one variable unreadably.
     facet_wrap(~ label, ncol = 1, scales = "free_y") +
     labs(
-      title   = "Meteorological drivers — DE-Tha 2000",
+      title    = "Meteorological drivers — US-NR1 (Niwot Ridge, CO) 2008",
       subtitle = "Half-hourly; PAR converted from SW_IN_F (W m⁻²) × 2.1",
       x        = NULL,
       y        = NULL
@@ -236,277 +204,426 @@ drivers |>
 
 ---
 
-## Parameters and initial conditions
+## Load and inspect drivers — US-MMS (DBF, temperate)
 
-```{r parameters}
+```{r drivers_mms, message=FALSE, fig.width=10, fig.height=6, fig.cap="Hourly PAR and air temperature at US-MMS (Morgan Monroe) during 2008. Note the warmer summers and colder winters than the high-elevation Niwot Ridge site, and the clear seasonal light cycle driving the deciduous phenology."}
+
+# ── Read the US-MMS site data ─────────────────────────────────────────────────
+# US-MMS is a temperate mixed deciduous broadleaf forest at Morgan Monroe State
+# Forest in Indiana.  You visited this site on Friday.  The dominant species are
+# sugar maple (Acer saccharum), tulip poplar (Liriodendron tulipifera), and
+# white oak (Quercus alba).
+#
+# US-MMS uses the AmeriFlux _HR_ hourly product: one row per 60 minutes,
+# 24 rows per calendar day.  The timestamp column is TIMESTAMP_START in integer
+# format YYYYMMDDHHMM — different from the ISO 8601 format at US-NR1.
+# See the timestep note below for why the 60-minute step matters.
+mms_raw <- read_csv(
+  file.path(data_dir, "US-MMS", "US-MMS_HR.csv"),
+  show_col_types = FALSE
+)
+
+# Replace FLUXNET missing-value sentinel with NA.
+mms_raw <- mms_raw |>
+  mutate(across(where(is.numeric), \(x) replace(x, x == -9999, NA)))
+
+# ── Filter to calendar year 2008 ──────────────────────────────────────────────
+# We use 2008 at US-MMS for consistency with US-NR1.
+# 2008 is a leap year: 366 days × 24 hourly periods = 8,784 rows.
+drivers_mms <- mms_raw |>
+  mutate(
+    # TIMESTAMP_START is an integer in YYYYMMDDHHMM format.
+    # as.character() converts the integer to a string so as.POSIXct()
+    # can parse it with the explicit format string.
+    datetime = as.POSIXct(
+      as.character(TIMESTAMP_START),
+      format = "%Y%m%d%H%M",
+      tz     = "UTC"
+    )
+  ) |>
+  filter(year(datetime) == 2008) |>
+  select(datetime, SW_IN_F, TA_F)
+
+# Confirm the expected row count.
+cat("US-MMS timesteps in 2008:", nrow(drivers_mms),
+    "(expect 8,784 for a leap year at hourly resolution)\n")
+
+# ── Convert to model input units ──────────────────────────────────────────────
+# Same PAR conversion as US-NR1: SW_IN_F (W m⁻²) × 2.1 → μmol photon m⁻² s⁻¹.
+# TA_F is already in °C.
+drivers_mms <- drivers_mms |>
+  mutate(
+    PAR  = pmax(SW_IN_F * 2.1, 0),
+    temp = TA_F
+  )
+
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │  TIMESTEP NOTE — important for unit conversions in Exercise 02              │
+# │                                                                             │
+# │  US-NR1 is half-hourly: 48 rows per day, 1800 seconds per timestep.        │
+# │  US-MMS is hourly:      24 rows per day, 3600 seconds per timestep.        │
+# │                                                                             │
+# │  SSEM itself has no fixed timestep requirement — it loops over whatever    │
+# │  rows you supply.  But the number of rows per day affects two things:      │
+# │                                                                             │
+# │  1. The x-axis of plot_forecast() counts timestep numbers, not dates.      │
+# │     For US-NR1, step 48 = end of day 1; for US-MMS it is step 24.         │
+# │                                                                             │
+# │  2. In Exercise 02, converting model output from μmol m⁻² s⁻¹ (a rate)   │
+# │     to gC m⁻² day⁻¹ (a daily total) requires multiplying by the step      │
+# │     length in seconds: 1800 s for US-NR1, 3600 s for US-MMS.              │
+# │     Using the wrong value introduces a factor-of-two error in daily totals │
+# │     — easy to miss, hard to diagnose in a plot.                            │
+# └─────────────────────────────────────────────────────────────────────────────┘
+
+# ── Plot the US-MMS drivers ───────────────────────────────────────────────────
+drivers_mms |>
+  select(datetime, PAR, temp) |>
+  pivot_longer(
+    cols      = c(PAR, temp),
+    names_to  = "variable",
+    values_to = "value"
+  ) |>
+  mutate(
+    label = case_when(
+      variable == "PAR"  ~ "PAR (μmol photon m⁻² s⁻¹)",
+      variable == "temp" ~ "Air temperature (°C)"
+    )
+  ) |>
+  ggplot(aes(x = datetime, y = value)) +
+    geom_line(linewidth = 0.1, alpha = 0.35, colour = "grey20") +
+    facet_wrap(~ label, ncol = 1, scales = "free_y") +
+    labs(
+      title    = "Meteorological drivers — US-MMS (Morgan Monroe, IN) 2008",
+      subtitle = "Hourly; PAR converted from SW_IN_F (W m⁻²) × 2.1",
+      x        = NULL,
+      y        = NULL
+    ) +
+    theme_classic(base_size = 12) +
+    theme(strip.background = element_blank(),
+          strip.text        = element_text(face = "bold"))
+```
+
+---
+
+## Parameters and initial conditions — US-NR1 (ENF)
+
+```{r parameters_nr1}
 # ── Ensemble size ─────────────────────────────────────────────────────────────
 # ensemble_forecast() reads 'ne' from the global environment — it must be
-# defined before you call the function. A larger ne samples parameter
-# uncertainty more thoroughly but increases run time in direct proportion.
-# 100 members gives a stable uncertainty envelope for exploratory work.
+# defined before you call the function.
 ne <- 100
 
 # Fix the random seed so your results match this document exactly.
-# Change the seed to explore a different realisation of the ensemble.
 set.seed(2026)
 
-# ── Initial carbon pool sizes (X) ─────────────────────────────────────────────
+# ── Initial carbon pool sizes for US-NR1 ─────────────────────────────────────
 # SSEM tracks three carbon pools, all in Mg C ha⁻¹:
 #   column 1 — Bleaf:  leaf carbon
 #   column 2 — Bwood:  wood (stem + coarse root) carbon
 #   column 3 — BSOM:   soil organic carbon
 #
-# Every row of X is one ensemble member. All members start from the same
-# point here because we are expressing our prior uncertainty entirely through
-# the parameter distributions below. A spin-up run (running the model to
-# equilibrium from arbitrary initial conditions) would give more defensible
-# starting values; for this exercise we use literature-based estimates for a
-# mature Norway spruce stand.
-# NOTE (bug fix): the original code used matrix(c(3.0, 100.0, 100.0), nrow=ne,
-# ncol=3, byrow=FALSE). Because matrix() fills column-by-column and recycles,
-# only ~33 of the ne ensemble members received Bleaf = 3.0; the remaining ~67
-# started at Bleaf = 100 or 100, inflating initial LAI by 50x and GPP by ~2x.
-# Explicit column assignment below is the correct approach.
-X <- matrix(NA_real_, nrow = ne, ncol = 3)
-# Bleaf: spruce needle carbon (Mg C ha-1). Literature values for mature
-# Picea abies: 2-5 Mg C ha-1. Needles live ~4 years; at any moment
-# roughly four cohorts are present.
-X[, 1] <- 3.0
-# Bwood: stem + coarse root carbon (Mg C ha-1). Mature managed spruce
-# in central Europe: 80-150 Mg C ha-1 (varies with stand age and site).
-X[, 2] <- 100.0
-# BSOM: soil organic carbon to 1 m depth (Mg C ha-1). Temperate forest
-# mineral soils typically store 50-150 Mg C ha-1; organic horizons
-# under spruce can push this higher.
-X[, 3] <- 100.0
+# Values below represent a mature subalpine ENF stand at Niwot Ridge.
+X_nr1 <- matrix(NA_real_, nrow = ne, ncol = 3)
+# Bleaf: needle carbon (Mg C ha⁻¹). Subalpine spruce/fir needles live 4–8 years;
+# at any time several needle cohorts are present. Typical ENF: 2–5 Mg C ha⁻¹.
+X_nr1[, 1] <- 3.0
+# Bwood: stem + coarse root carbon. Subalpine ENF at US-NR1: 80–130 Mg C ha⁻¹.
+X_nr1[, 2] <- 100.0
+# BSOM: soil organic carbon to 1 m depth. Subalpine soils accumulate organic
+# matter slowly due to cold temperatures; 80–120 Mg C ha⁻¹ is a reasonable range.
+X_nr1[, 3] <- 100.0
 
-# ── Parameter ensemble ────────────────────────────────────────────────────────
-# We draw ne realisations of each parameter from a probability distribution
-# that represents our prior uncertainty about the true value at this site.
-# The spread propagates through the model and appears as the grey uncertainty
-# envelope in Chunk 4. Wider priors → wider envelopes → more honest
-# representation of what we do not know.
-params <- data.frame(
+# ── ENF parameter ensemble (US-NR1, spruce/fir) ───────────────────────────────
+# Parameter values are appropriate for a subalpine ENF.  Compared with a DBF:
+#   • Longer needle longevity → lower litterfall rate
+#   • Similar wood turnover
+#   • CUE (NPP/GPP) slightly lower → higher Ra fraction
+#   • Similar alpha and SLA to other cold-climate conifers
+params_nr1 <- data.frame(
 
-  # α (alpha): canopy light use efficiency
-  #   The slope of the GPP–PAR relationship: GPP = α × Beer's law × PAR
-  #   Units: μmol CO₂ per μmol photon absorbed (dimensionless ratio)
-  #   In a full LSM: derived from leaf-level Vcmax and Jmax through the
-  #   Farquhar model; here compressed into one empirical constant.
-  #   Norway spruce literature: 0.01–0.03 μmol μmol⁻¹ (Medlyn et al. 2003).
+  # α: canopy light use efficiency (μmol CO₂ per μmol photon absorbed)
+  # GPP = α × Beer's law × PAR
+  # Subalpine conifers: 0.015–0.025 μmol μmol⁻¹ (slightly lower than
+  # low-elevation sites due to high-elevation UV and cold stress).
   alpha = rnorm(ne, mean = 0.02, sd = 0.003) |> pmax(0),
 
-  # SLA: specific leaf area
-  #   Converts leaf carbon mass to leaf area: LAI = Bleaf × SLA × 0.1
-  #   (the 0.1 converts Mg ha⁻¹ to kg m⁻² for unit consistency).
-  #   Units: m² leaf area per kg leaf dry mass
-  #   In a full LSM: read from trait databases (TRY); Norway spruce: 4–12 m² kg⁻¹.
+  # SLA: specific leaf area (m² leaf per kg leaf dry mass)
+  # Conifer needles are thicker and denser than broadleaf leaves.
+  # Engelmann spruce / subalpine fir: 4–10 m² kg⁻¹.
   SLA = rnorm(ne, mean = 8.0, sd = 1.2) |> pmax(1),
 
   # Rbasal: basal heterotrophic respiration rate
-  #   Rh = Rbasal × BSOM × Q10^(temp / 10)
-  #   Units: μmol CO₂ m⁻² s⁻¹ per Mg C ha⁻¹ of soil organic carbon.
-  #   Interpretation: with BSOM = 100 Mg C ha⁻¹ and temp = 10 °C,
-  #   Rbasal = 0.015 gives Rh ≈ 3 μmol m⁻² s⁻¹ — within the observed
-  #   range for temperate forest soils (Janssens et al. 2001).
-  #   In a full LSM: fitted from soil incubation data or inferred from the
-  #   seasonal Rh–temperature relationship in flux tower data.
+  # Rh = Rbasal × BSOM × Q10^(temp / 10)
+  # Cold subalpine soils decompose slowly; Rbasal is similar to other sites
+  # because it is calibrated against the actual soil carbon pool size.
   Rbasal = rnorm(ne, mean = 0.015, sd = 0.003) |> pmax(0),
 
-  # Q10: temperature sensitivity of heterotrophic respiration
-  #   Each 10 °C increase in soil temperature multiplies Rh by Q10.
-  #   Dimensionless; meta-analyses report 1.4–2.5; canonical value = 2.
-  #   In a full LSM: fitted from soil warming experiments or from the
-  #   slope of the seasonal Rh–temperature relationship at the tower.
+  # Q10: temperature sensitivity of heterotrophic respiration (dimensionless)
+  # High-elevation soils show similar Q10 to low-elevation sites.
   Q10 = rnorm(ne, mean = 2.0, sd = 0.3) |> pmax(1),
 
   # litterfall: fraction of leaf C transferred to BSOM per 30-min timestep
-  #   Norway spruce needles live on average ~4 years, so ~25% of Bleaf
-  #   falls to the soil each year: 0.25 / (365 × 48) ≈ 1.4 × 10⁻⁵ per step.
-  #   Units: dimensionless fraction per 30-min timestep
-  #   In a full LSM: output of a phenology model (budburst + senescence dates
-  #   driven by photoperiod and temperature); SSEM treats it as constant.
+  # Subalpine fir needles live ~4 years → ~25% annual turnover.
+  # Per 30-min step: 0.25 / (365 × 48) ≈ 1.4 × 10⁻⁵
   litterfall = rnorm(ne, mean = 1.4e-5, sd = 1.5e-6) |> pmax(0),
 
   # mortality: fraction of wood C transferred to BSOM per 30-min timestep
-  #   Includes stem death and coarse root turnover. Managed spruce in Europe
-  #   is harvested on ~80-year rotations → ~1.25% yr⁻¹ carbon loss from Bwood.
-  #   Per 30-min step: 0.0125 / (365 × 48) ≈ 7.1 × 10⁻⁷
-  #   Units: dimensionless fraction per 30-min timestep
-  #   In a full LSM: output of a demographic or disturbance model.
+  # ~80-year natural stand rotation → ~1.25% yr⁻¹.
+  # Per 30-min step: 0.0125 / (365 × 48) ≈ 7.1 × 10⁻⁷
   mortality = rnorm(ne, mean = 7.1e-7, sd = 7e-8) |> pmax(0),
 
-  # sigma.leaf, sigma.stem, sigma.soil: process noise standard deviations
-  #   Gaussian noise added to each pool at every timestep to represent model
-  #   structural error — the cumulative mismatch between what the equations
-  #   predict and what the real ecosystem does (missing processes, parameter
-  #   error, numerical discretisation). Units: Mg C ha⁻¹.
-  #   The particle filter (Exercise 02) can estimate these from the data.
-  #   Leaf pool is small and tightly coupled to inputs, so gets smaller noise.
   sigma.leaf = rep(0.01, ne),
   sigma.stem = rep(0.10, ne),
   sigma.soil = rep(0.10, ne)
 )
 
-# ── Carbon allocation fractions ───────────────────────────────────────────────
-# SSEM splits GPP into three competing fates; their fractions must sum to 1
-# for every ensemble member. We draw from a Dirichlet distribution, which is
-# the correct prior for a probability simplex (values in [0,1] summing to 1).
-#
-# Concentration parameters control the expected proportions:
+# Carbon allocation fractions for an ENF (Dirichlet concentration parameters):
 #   falloc.1 → Ra (autotrophic respiration)  : 5 / 10 = 50% expected
 #   falloc.2 → NPPwood (wood growth)         : 3 / 10 = 30% expected
 #   falloc.3 → NPPleaf (leaf growth)         : 2 / 10 = 20% expected
 #
-# These are consistent with a carbon use efficiency (CUE = NPP/GPP) of ~0.50,
-# which is close to the observed mean for temperate forests (Malhi 2012).
-# Larger concentration values reduce the spread across ensemble members.
-falloc <- rdirichlet.orig(ne, alpha = c(5, 3, 2))
-params$falloc.1 <- falloc[, 1]   # fraction of GPP → Ra
-params$falloc.2 <- falloc[, 2]   # fraction of GPP → wood NPP
-params$falloc.3 <- falloc[, 3]   # fraction of GPP → leaf NPP
+# Carbon use efficiency (CUE = NPP/GPP) for ENF ≈ 0.50.  Evergreen conifers
+# invest less in leaf rebuilding than deciduous trees.
+falloc_nr1 <- rdirichlet.orig(ne, alpha = c(5, 3, 2))
+params_nr1$falloc.1 <- falloc_nr1[, 1]
+params_nr1$falloc.2 <- falloc_nr1[, 2]
+params_nr1$falloc.3 <- falloc_nr1[, 3]
 
-# Verify the constraint holds for every ensemble member.
 stopifnot(
-  all(abs(rowSums(params[, c("falloc.1", "falloc.2", "falloc.3")]) - 1) < 1e-10)
+  all(abs(rowSums(params_nr1[, c("falloc.1", "falloc.2", "falloc.3")]) - 1) < 1e-10)
 )
 
-# Print the parameter ensemble summary so you can see the prior spread.
-cat("\nParameter ensemble: mean ± SD across", ne, "members\n")
+cat("\nUS-NR1 ENF parameter ensemble: mean ± SD across", ne, "members\n")
 cat(sprintf("  %-12s  %10s  %10s\n", "parameter", "mean", "SD"))
 cat(rep("-", 38), "\n", sep = "")
-for (p in names(params)) {
-  cat(sprintf("  %-12s  %10.3g  %10.3g\n", p, mean(params[[p]]), sd(params[[p]])))
+for (p in names(params_nr1)) {
+  cat(sprintf("  %-12s  %10.3g  %10.3g\n", p, mean(params_nr1[[p]]), sd(params_nr1[[p]])))
 }
 ```
 
 ---
 
-## Run the model and examine output
+## Parameters and initial conditions — US-MMS (DBF)
 
-```{r model_run, cache=TRUE, fig.width=12, fig.height=10, fig.cap="SSEM ensemble output for DE-Tha 2000. Grey envelope: 95% credible interval across 100 ensemble members. Dark line: ensemble median. x-axis: 30-minute timestep number (48 steps = 1 day; 17,568 steps = full leap year)."}
+```{r parameters_mms}
+# ── Initial carbon pool sizes for US-MMS ──────────────────────────────────────
+# Representative values for a mature mixed deciduous broadleaf forest in Indiana.
+X_mms <- matrix(NA_real_, nrow = ne, ncol = 3)
+# Bleaf: leaf carbon. Deciduous forests rebuild their canopy from scratch each
+# spring; at peak leaf-out, Bleaf ≈ 1–4 Mg C ha⁻¹ for a mature stand.
+X_mms[, 1] <- 3.0
+# Bwood: stem + coarse root carbon. Old-growth mixed hardwood: 80–130 Mg C ha⁻¹.
+X_mms[, 2] <- 100.0
+# BSOM: soil organic carbon. Thick deciduous leaf litter contributes to high
+# SOM stocks; 80–120 Mg C ha⁻¹ is consistent with southern Indiana NRCS data.
+X_mms[, 3] <- 100.0
+
+# ── DBF parameter ensemble (US-MMS, deciduous broadleaf) ──────────────────────
+# The key difference from the ENF ensemble is leaf longevity:
+#   ENF: needles live ~4 years → litterfall ≈ 0.25 / (365×48) ≈ 1.4×10⁻⁵ per step
+#   DBF: leaves live ~1 year  → litterfall ≈ 1.0  / (365×48) ≈ 5.7×10⁻⁵ per step
+# This 4× higher litterfall rate reflects that deciduous trees rebuild their
+# full canopy from scratch every spring.  It also means Bleaf is more dynamic
+# in the DBF run: the model will show a larger spring increase in Bleaf.
+#
+# The carbon allocation fractions also differ:
+#   ENF: c(5,3,2) → Ra 50% | NPPwood 30% | NPPleaf 20%
+#   DBF: c(4,3,3) → Ra 40% | NPPwood 30% | NPPleaf 30%
+# The higher leaf allocation (30% vs 20%) reflects the cost of rebuilding the
+# full deciduous canopy each year.
+
+lf_annual_dbf <- 1.0    # yr⁻¹: 100% annual leaf turnover for a deciduous tree
+steps_per_yr_hh <- 365L * 48L   # 17,520 half-hourly steps in a non-leap year
+
+params_mms <- data.frame(
+
+  # alpha: canopy light use efficiency
+  # Growing-season LUE of temperate broadleaf forests broadly similar to ENF.
+  alpha = rnorm(ne, mean = 0.02, sd = 0.003) |> pmax(0),
+
+  # SLA: specific leaf area. Deciduous broadleaf trees have thinner leaves;
+  # oak/maple typical range: 12–25 m² kg⁻¹. Using 15.0 as prior mean.
+  SLA = rnorm(ne, mean = 15.0, sd = 2.0) |> pmax(1),
+
+  # Rbasal: basal heterotrophic respiration rate. Indiana soils are warmer
+  # on average than subalpine Colorado; using same prior as a neutral start.
+  Rbasal = rnorm(ne, mean = 0.015, sd = 0.003) |> pmax(0),
+
+  # Q10: temperature sensitivity of heterotrophic respiration.
+  Q10 = rnorm(ne, mean = 2.0, sd = 0.3) |> pmax(1),
+
+  # litterfall: deciduous ~1-year leaf longevity.
+  # Per 30-min step: 1.0 / (365 × 48) ≈ 5.71 × 10⁻⁵
+  litterfall = rnorm(
+    ne,
+    mean = lf_annual_dbf / steps_per_yr_hh,
+    sd   = lf_annual_dbf * 0.1 / steps_per_yr_hh
+  ) |> pmax(0),
+
+  # mortality: same woody turnover rate as ENF.
+  mortality = rnorm(ne, mean = 7.1e-7, sd = 7e-8) |> pmax(0),
+
+  sigma.leaf = rep(0.01, ne),
+  sigma.stem = rep(0.10, ne),
+  sigma.soil = rep(0.10, ne)
+)
+
+# Carbon allocation fractions for a DBF:
+#   falloc.1 → Ra   (autotrophic respiration): 4 / 10 = 40%
+#   falloc.2 → NPPwood (wood growth):          3 / 10 = 30%
+#   falloc.3 → NPPleaf (leaf growth):          3 / 10 = 30%
+# Higher CUE than ENF (0.60 vs 0.50) is consistent with observations in
+# deciduous forests (Malhi 2012).
+falloc_mms <- rdirichlet.orig(ne, alpha = c(4, 3, 3))
+params_mms$falloc.1 <- falloc_mms[, 1]
+params_mms$falloc.2 <- falloc_mms[, 2]
+params_mms$falloc.3 <- falloc_mms[, 3]
+
+stopifnot(
+  all(abs(rowSums(params_mms[, c("falloc.1", "falloc.2", "falloc.3")]) - 1) < 1e-10)
+)
+
+cat("\nUS-MMS DBF parameter ensemble: mean ± SD across", ne, "members\n")
+cat(sprintf("  %-12s  %10s  %10s\n", "parameter", "mean", "SD"))
+cat(rep("-", 38), "\n", sep = "")
+for (p in names(params_mms)) {
+  cat(sprintf("  %-12s  %10.3g  %10.3g\n", p, mean(params_mms[[p]]), sd(params_mms[[p]])))
+}
+```
+
+---
+
+## Run the model — US-NR1
+
+```{r model_run_nr1, cache=TRUE, fig.width=12, fig.height=10, fig.cap="SSEM ensemble output for US-NR1 (Niwot Ridge, CO) 2008. Grey envelope: 95% credible interval across 100 ensemble members. Dark line: ensemble median. x-axis: 30-minute timestep number (48 steps = 1 day; 17,568 steps = full leap year)."}
 
 # ── Assemble inputs ───────────────────────────────────────────────────────────
-# ensemble_forecast() expects a plain data.frame with exactly the columns
-# 'PAR' and 'temp', one row per model timestep. The function loops over rows
-# in chronological order, passing each row to SSEM() as the current drivers.
-inputs <- drivers |>
+inputs_nr1 <- drivers_nr1 |>
   select(PAR, temp) |>
-  as.data.frame()   # convert from tibble; some internal indexing expects data.frame
+  as.data.frame()
 
-# Confirm dimensions match: inputs must have one row per timestep.
-cat("Input rows:", nrow(inputs), " | Expected (leap year):", 17568, "\n")
+cat("US-NR1 input rows:", nrow(inputs_nr1), " | Expected (leap year):", 17568, "\n")
 
 # ── Run the ensemble ──────────────────────────────────────────────────────────
-# ensemble_forecast() runs all ne ensemble members forward simultaneously.
-# It reads 'ne' from the global environment (defined in the previous chunk).
-# A counter prints every 336 steps (= 7 days); for a leap year expect ~52 lines.
-# Run time is approximately 2–4 minutes on a modern laptop.
-#
-# The returned object is a 3-D array:
-#   dim 1 — timestep          (one 30-min step per row)
-#   dim 2 — ensemble member   (ne columns)
-#   dim 3 — output variable   (12 variables; see list below)
-#
-# Variable index → name → units:
-#    1  Bleaf      leaf carbon            Mg C ha⁻¹
-#    2  Bwood      wood carbon            Mg C ha⁻¹
-#    3  BSOM       soil organic carbon    Mg C ha⁻¹
-#    4  LAI        leaf area index        m² m⁻²
-#    5  GPP        gross primary prod.    μmol CO₂ m⁻² s⁻¹
-#    6  NEP        net ecosystem prod.    μmol CO₂ m⁻² s⁻¹
-#    7  Ra         autotrophic resp.      μmol CO₂ m⁻² s⁻¹
-#    8  NPPw       wood net prim. prod.   μmol CO₂ m⁻² s⁻¹
-#    9  NPPl       leaf net prim. prod.   μmol CO₂ m⁻² s⁻¹
-#   10  Rh         heterotrophic resp.    μmol CO₂ m⁻² s⁻¹
-#   11  litterfall leaf C to soil         Mg C ha⁻¹ per timestep
-#   12  mortality  wood C to soil         Mg C ha⁻¹ per timestep
-message("Starting model run — expect 2–4 minutes …")
-output <- ensemble_forecast(X, params, inputs)
+# ensemble_forecast() reads 'ne' from the global environment (set in Chunk 3).
+# Run time: approximately 2–4 minutes on a modern laptop.
+message("Starting US-NR1 model run — expect 2–4 minutes …")
+output_nr1 <- ensemble_forecast(X_nr1, params_nr1, inputs_nr1)
 
-cat("\nOutput array dimensions [timesteps × ensemble members × variables]:\n")
-print(dim(output))
-
-# ── What does the ensemble spread represent? ──────────────────────────────────
-# Each ensemble member carries a different parameter set drawn from the
-# distributions in Chunk 3. When run forward, those differences compound over
-# time into diverging pool trajectories and flux time series. The width of the
-# 95% envelope at any timestep is therefore a direct measure of forecast
-# uncertainty arising from parameter uncertainty. A wide envelope means the
-# model output is sensitive to that source of uncertainty; a narrow envelope
-# means the model is relatively insensitive to it. In Exercise 02 you will
-# use eddy covariance NEP observations to weight ensemble members by
-# how well they match the data — the particle filter — collapsing the
-# envelope where observations provide information and leaving it wide where
-# they do not.
+cat("\nUS-NR1 output dimensions [timesteps × ensemble × variables]:\n")
+print(dim(output_nr1))
 
 # ── Plot all 12 output variables ──────────────────────────────────────────────
-# plot_forecast() (from R/functions.R) computes the 2.5th, 50th, and 97.5th
-# percentiles of the ensemble at each timestep and renders them as a shaded
-# ribbon (ciEnvelope) around the median line. The function uses base R graphics
-# rather than ggplot2 because it is from the upstream SSEM repository; we call
-# it unchanged.
-par(mfrow = c(4, 3),           # 4 rows × 3 columns = 12 panels for 12 variables
-    mar   = c(3, 4, 3, 0.5))  # tighter margins so all panels fit comfortably
-plot_forecast(output)
-
-# Reset to single-panel layout for any subsequent plots.
+par(mfrow = c(4, 3), mar = c(3, 4, 3, 0.5))
+plot_forecast(output_nr1)
+title(main = "US-NR1 — Niwot Ridge ENF — 2008", outer = TRUE, line = -1)
 par(mfrow = c(1, 1), mar = c(5, 4, 4, 2) + 0.1)
 
 # ── Save output for Exercise 02 ───────────────────────────────────────────────
-# Exercise 02 loads this RDS to compare SSEM output against observations.
-# Saving here means you only need to run Exercise 01 once; re-knitting
-# Exercise 02 will always find the file even without re-running the model.
-saveRDS(output, file.path(data_dir, "ssem_detha_2000.rds"))
-message("Saved SSEM output → ", file.path(data_dir, "ssem_detha_2000.rds"))
+saveRDS(output_nr1, file.path(data_dir, "ssem_usnr1_2008.rds"))
+message("Saved SSEM output → ", file.path(data_dir, "ssem_usnr1_2008.rds"))
+```
 
-# ── Explore further ───────────────────────────────────────────────────────────
-# Half-hourly driver data are available for two additional temperate forest sites:
-#
-#   data/DK-Sor/DK-Sor_HH.csv
-#     Soroe, Denmark — European beech forest (Fagus sylvatica); deciduous,
-#     so it has a very pronounced spring green-up and autumn leaf-off. Contrast
-#     the seasonal GPP shape with DE-Tha.
-#
-#   data/US-MMS/  (daily and monthly only for this site; no HH file)
-#     Morgan Monroe State Forest, Indiana — mixed deciduous broadleaf forest;
-#     warmer summers and colder winters than Germany.
-#
-# To run SSEM at DK-Sor, replace DE-Tha_HH.csv with DK-Sor_HH.csv in Chunk 2
-# and re-knit. Consider: does an evergreen model structure make sense for beech?
+---
+
+## Run the model — US-MMS
+
+```{r model_run_mms, cache=TRUE, fig.width=12, fig.height=10, fig.cap="SSEM ensemble output for US-MMS (Morgan Monroe, IN) 2008. x-axis: hourly timestep number (24 steps = 1 day; 8,784 steps = full leap year at hourly resolution)."}
+
+# ── Assemble inputs ───────────────────────────────────────────────────────────
+inputs_mms <- drivers_mms |>
+  select(PAR, temp) |>
+  as.data.frame()
+
+cat("US-MMS input rows:", nrow(inputs_mms), " | Expected (leap year hourly):", 8784, "\n")
+
+# ── Run the ensemble ──────────────────────────────────────────────────────────
+# US-MMS has 8,784 hourly timesteps (vs 17,568 half-hourly for US-NR1).
+# Expected run time: approximately 1–2 minutes.
+message("Starting US-MMS model run — expect 1–2 minutes …")
+output_mms <- ensemble_forecast(X_mms, params_mms, inputs_mms)
+
+cat("\nUS-MMS output dimensions [timesteps × ensemble × variables]:\n")
+print(dim(output_mms))
+
+# ── Plot all 12 output variables ──────────────────────────────────────────────
+par(mfrow = c(4, 3), mar = c(3, 4, 3, 0.5))
+plot_forecast(output_mms)
+title(main = "US-MMS — Morgan Monroe DBF — 2008", outer = TRUE, line = -1)
+par(mfrow = c(1, 1), mar = c(5, 4, 4, 2) + 0.1)
+
+# ── Save output for Exercise 02 ───────────────────────────────────────────────
+saveRDS(output_mms, file.path(data_dir, "ssem_usmms_2008.rds"))
+message("Saved SSEM output → ", file.path(data_dir, "ssem_usmms_2008.rds"))
 ```
 
 ---
 
 ## Discussion questions
 
-Work through the following questions before moving on to Exercise 02. There
-are no single correct answers; the goal is to reason from what you know about
-forest carbon cycling and what you can see in the model output panels above.
+Work through the following questions before moving on to Exercise 02. Compare
+the US-NR1 and US-MMS outputs side by side. There are no single correct
+answers; the goal is to reason from what you know about forest carbon cycling
+and what you can see in the model output panels above.
 
-**1. Seasonal pattern of GPP.** Examine the GPP panel. Describe the seasonal
-trajectory: when does GPP peak, when does it drop toward zero, and does the
-shape match your expectation for a temperate Norway spruce forest? Spruce is
-an evergreen conifer — unlike a beech or oak it retains its needles year-round
-and can photosynthesize on warm winter days. Does the output reflect that
-possibility? Think about what the light-use-efficiency formulation assumes
-about stomatal behaviour in cold or dry conditions, and consider whether that
-assumption is likely to exaggerate or suppress winter GPP at this site.
+**1. GPP seasonality: ENF vs DBF.** Look at the GPP panels for both sites.
+Describe the seasonal trajectory of GPP at each site: when does it peak, when
+does it approach zero, and how sharp is the spring transition? US-NR1 is an
+evergreen conifer forest — unlike the deciduous trees at US-MMS, the spruce and
+fir at Niwot Ridge retain their needles year-round and can photosynthesize on
+warm winter days. Does the US-NR1 output reflect that possibility? SSEM has no
+explicit phenology trigger for leaf-on/leaf-off events. How does it produce any
+seasonal variation at all in the DBF run, and why is the spring green-up likely
+to look gradual rather than abrupt?
 
-**2. Information needed to evaluate the output.** You have a model trajectory
-but no observational reference to compare it against. List the data streams that
-would allow you to assess whether this output is realistic, and for each one
-note: (a) which model variable or flux it constrains most directly, (b) the
-typical measurement uncertainty you would need to account for, and (c) any
-mismatch in temporal or spatial scale between the observation and the model
-output. Consider both eddy covariance fluxes available at DE-Tha through the
-FLUXNET archive and independent pool-level measurements such as forest
-inventory biomass, litter trap data, or soil carbon surveys.
+**2. Carbon pools and the litterfall difference.** Look at the Bleaf panels.
+The ENF and DBF runs use very different litterfall rates (1.4×10⁻⁵ vs 5.7×10⁻⁵
+per 30-min step). Does this show up as a visible difference in the Bleaf
+trajectory? In the absence of an explicit phenology module, SSEM simulates
+seasonal leaf area change as the balance between NPPleaf allocation and the
+constant litterfall rate. What would happen to the Bleaf trajectory if you
+doubled the litterfall rate in the DBF run?
 
-**3. Ensemble spread and forecast uncertainty.** Compare the width of the grey
-uncertainty envelope across the 12 panels. Which state variables or fluxes
-show the widest spread relative to their magnitude, and which are tightly
-constrained? What does this pattern tell you about which parameters dominate
-forecast uncertainty? If you could make one additional field measurement to
-reduce the uncertainty in the carbon-cycle forecast, which measurement would
-you choose, and why?
+**3. Information needed to evaluate these outputs.** List the data streams that
+would allow you to assess whether the model output is realistic at each site,
+and for each one note: (a) which model variable or flux it constrains most
+directly, (b) the typical measurement uncertainty you would need to account for,
+and (c) any mismatch in temporal or spatial scale between the observation and the
+model output. Distinguish between observations that would be informative at both
+sites versus those that would be specific to only one vegetation type.
+
+**4. Ensemble spread and forecast uncertainty.** Compare the width of the grey
+uncertainty envelopes across the 12 panels at each site. Which state variables
+or fluxes show the widest spread relative to their magnitude? Does the ENF or
+DBF run produce wider uncertainty envelopes? What does that pattern tell you
+about how the different parameter sets propagate uncertainty through the model?
+
+---
+
+## Optional extensions
+
+Two additional European forest sites are available for further exploration.
+These sites are provided as extensions for students who want to compare SSEM
+across a broader range of temperate forest types.
+
+- **DE-Tha** — Tharandt, Saxony, Germany.  Norway spruce plantation (Picea abies),
+  ENF.  Half-hourly FLUXNET product; timestamp column DATETIME_START (ISO 8601).
+  Year 2000 is the reference year used in older versions of this exercise.
+  Data file: `data/DE-Tha/DE-Tha_HH.csv`
+
+- **DK-Sor** — Sorø, Denmark.  European beech forest (Fagus sylvatica), DBF.
+  Half-hourly FLUXNET product; same timestamp format as DE-Tha.
+  Contrast the sharp deciduous spring green-up at DK-Sor with the evergreen
+  structure at DE-Tha.  Data file: `data/DK-Sor/DK-Sor_HH.csv`
+
+To run SSEM at either extension site:
+
+1. Load the HH.csv file using `read_csv()` and parse DATETIME_START with
+   `ymd_hms()`.
+2. Filter to a year of your choice and select SW_IN_F and TA_F.
+3. Apply the PAR conversion and run `ensemble_forecast()` with appropriate
+   parameter values (use the ENF parameters from this document for DE-Tha, or
+   the DBF parameters for DK-Sor).
+4. Plot the output with `plot_forecast()` and compare the seasonal structure
+   across all four sites.
