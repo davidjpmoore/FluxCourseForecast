@@ -156,3 +156,35 @@ Auto-updated by Claude Code. Each entry records a task completion.
 ### Staging folder
 - Copied install_packages.R and SETUP_INSTRUCTIONS.md to exercises/student_data/Tuesday_AM_SSEM_part1/
 - Zip NOT rebuilt per instructions
+
+## [2026-06-08] Final student zip build and Google Drive upload
+
+### Manifest verification
+- Expected: 27 files per spec
+- Found: 28 files (extra: SETUP_INSTRUCTIONS.md — not in manifest)
+- Action: removed SETUP_INSTRUCTIONS.md from staging folder
+- Final staging folder: 27 files confirmed
+
+### Zip contents (27 files, 35 zip entries including 8 directory entries)
+| File | Uncompressed |
+|---|---|
+| install_packages.R | 2.7 KB |
+| R/functions.R | 13.6 KB |
+| R/utils.R | 3.7 KB |
+| US-NR1/US-NR1_HH.csv | 451 MB |
+| US-NR1/US-NR1_DD.csv | 14.0 MB |
+| US-MMS/US-MMS_HR.csv | 284 MB |
+| US-MMS/US-MMS_DD.csv | 19.8 MB |
+| DE-Tha/DE-Tha_HH.csv | 695 MB |
+| DE-Tha/DE-Tha_DD.csv | 23.3 MB |
+| DK-Sor/DK-Sor_HH.csv | 682 MB |
+| DK-Sor/DK-Sor_DD.csv | 22.4 MB |
+| cmip6/ (12 CSVs) | ~64–78 KB each |
+| fluxcom/ (4 CSVs) | ~22 KB each |
+- Total uncompressed: ~2.14 GB (2,298,879,744 bytes)
+- Total compressed: 701 MB (~67% deflation)
+
+### Google Drive upload
+- Path: ~/Library/CloudStorage/GoogleDrive-setanta.research@gmail.com/My Drive/FLUXCOURSE 2026 Shared Resources/Week 2 Instructional Materials/Tuesday_AM_SSEM_part1.zip
+- Size confirmed: 701 MB
+- Timestamp: 2026-06-08 13:39
