@@ -254,3 +254,111 @@ Auto-updated by Claude Code. Each entry records a task completion.
   serve as spin-up; carbon pools are not reset between years
 - build_dashboard.R stops with a clear error if fullrecord RDS files are missing (run
   run_full_record.R first)
+
+## [2026-06-09] Diagnostic: SSEM 95% CI ribbon not visible in dashboard.html
+
+### Task
+Investigate why the SSEM 95% CI ribbon does not appear in exercises/dashboard.html.
+Three ordered checks were performed. No files were modified during this diagnostic.
+
+---
+
+### Check 1: R data preparation in build_dashboard.R
+
+**Goal:** Confirm that `proc_ssem_full()` computes CI bounds and stores them under the
+expected column names before the JSON is serialised.
+
+**Method:** Read `proc_ssem_full()` in build_dashboard.R and trace the data flow from
+`ens_ci()` through to the `daily` list returned by the function.
+
+**Findings:**
+- `ens_ci()` (defined in build_dashboard.R) calls `apply(m, 1, quantile, probs=c(0.025, 0.5, 0.975), na.rm=TRUE)` — correct three-quantile calculation.
+- The function returns a list with named elements `lo`, `med`, `hi` corresponding to the 2.5th, 50th, and 97.5th percentiles.
+- `agg_to_daily()` calls `ens_ci()` for each variable index and stores the result as `list(lo=..., med=..., hi=...)`.
+- The `daily` list assembled in `proc_ssem_full()` uses the key pattern `nee_lo`, `nee_med`, `nee_hi`, `gpp_lo`, `gpp_med`, `gpp_hi`, `rh_lo`, `rh_med`, `rh_hi`, `lai_lo`, `lai_med`, `lai_hi` — exactly matching the JS access pattern `dd[f+"_lo"]`, `dd[f+"_med"]`, `dd[f+"_hi"]`.
+- CI values are non-trivial: mean CI width for NEE = 5.04 gC m⁻² d⁻¹, maximum = 10.11 gC m⁻² d⁻¹.
+
+**Conclusion:** R data preparation is correct. CI bounds are computed and named correctly.
+
+---
+
+### Check 2: JSON embedded in dashboard.html
+
+**Goal:** Confirm that the CI arrays are present in the serialised `DATA` object with
+non-trivial values.
+
+**Method:** Extract the `const DATA = {...}` JSON block from dashboard.html using Python
+and inspect the US-NR1 SSEM daily CI arrays.
+
+**Findings:**
+- Keys `nee_lo`, `nee_hi`, `gpp_lo`, `gpp_hi` (and counterparts for RH and LAI) are all present in `DATA["US-NR1"]["ssem"]["daily"]`.
+- Array lengths: 9,496 elements each (1998-01-01 through 2023-12-31, daily).
+- Null count in each CI array: 0 (no missing values propagated from R).
+- Sample values (first 5 days, NEE):
+  - `nee_lo`:  [-1.3082, -1.2048, -1.0139, -1.7530, -1.3021]
+  - `nee_med`: [-0.3929, -0.2925, -0.2577, -0.8150, -0.5202]
+  - `nee_hi`:  [ 0.4664,  0.5778,  0.3755,  0.0191,  0.1533]
+- Values are genuinely distinct: lo < med < hi with a non-zero spread on day 1.
+
+**Conclusion:** JSON serialisation is correct. CI data is complete, null-free, and distinct
+from the median in the embedded payload.
+
+---
+
+### Check 3: JavaScript rendering
+
+**Goal:** Confirm the ribbon() function is wired correctly to the checkbox and
+the fill trace parameters are valid for Plotly.js 2.26.2.
+
+**Method:** Search dashboard.html for the ribbon() function definition,
+the fillcolor expression, the checkbox ID, and the getTraces() call site.
+
+**Findings:**
+
+**(a) ribbon() function — present and structurally correct**
+The function concatenates `hi` forward and `lo` reversed to form a closed polygon:
+```
+x: dates.concat(dates.slice().reverse())   → 18,992 points
+y: hi.concat(lo.slice().reverse())          → 18,992 points
+fill: "toself"                              → correct for self-closing polygon
+```
+This is the standard Plotly scatter ribbon pattern.
+
+**(b) fillcolor: "#1a3a5c28" — 8-digit hex format, likely not supported**
+`C.ssem = "#1a3a5c"` (confirmed from the color palette object).
+`fillcolor: col + "28"` produces the string `"#1a3a5c28"`.
+
+`#RRGGBBAA` 8-digit hex is a CSS Color Level 4 feature. Plotly.js 2.26.2 bundles
+tinycolor2 for color parsing. While recent tinycolor2 versions (≥1.4.0) accept 8-digit
+hex, the version bundled in Plotly 2.26.2 may not. If the color string is not
+recognised, Plotly silently falls back to transparent or ignores the fill, making the
+ribbon invisible. The standard Plotly format for a semi-transparent fill is
+`"rgba(26, 58, 92, 0.16)"` (alpha in 0–1 range), not 8-digit hex.
+
+**This is the primary suspect for the invisible ribbon.**
+
+**(c) Ribbon polygon size — 18,992 points**
+The full-record daily array has 9,496 dates (26 years). The closed-polygon ribbon
+therefore has 18,992 points — 26× larger than the old single-year dashboard
+(366 days → 732 polygon points). At this scale, Plotly's canvas-based fill renderer
+may fail silently, skip rendering the fill, or produce a blank fill on some browsers.
+This is a secondary suspect and would compound Issue (b).
+
+**(d) Checkbox wiring — correct**
+- Checkbox `id="cb_ssem_ci"` is present in the HTML and is `checked` by default.
+- `getTraces()` calls `if (cb("cb_ssem_ci")) t.push(...ribbon(...))` — the ID matches exactly.
+- No `visible: false` is set on either the fill or the median line trace from `ribbon()`.
+- The condition `dd[f+"_med"]` is truthy (confirmed by Check 2 — data exists).
+
+**Conclusion:** Two bugs identified that together explain the invisible ribbon:
+
+1. **`fillcolor:"#1a3a5c28"` — 8-digit hex alpha** — Plotly.js 2.26.2 may not parse this
+   as a semi-transparent color, causing the fill to be invisible. Fix: replace with
+   `"rgba(26, 58, 92, 0.16)"`.
+
+2. **18,992-point polygon** — the full-record daily ribbon is 26× larger than a
+   single-year ribbon and may exceed Plotly's fill rendering capacity. Fix: consider
+   downsampling to weekly or monthly resolution for the ribbon only (keep median daily),
+   or pre-aggregate CI to a coarser resolution before embedding in the HTML.
+
+No fix has been applied. Awaiting approval before modifying any files.
