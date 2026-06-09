@@ -362,3 +362,44 @@ This is a secondary suspect and would compound Issue (b).
    or pre-aggregate CI to a coarser resolution before embedding in the HTML.
 
 No fix has been applied. Awaiting approval before modifying any files.
+
+---
+
+## [2026-06-09] Fix: SSEM 95% CI ribbon — two bugs corrected in build_dashboard.R
+
+### Approved changes
+
+Two bugs identified in the diagnostic above were fixed in `exercises/build_dashboard.R`:
+
+**Fix 1 — fillcolor format (primary bug)**
+Added a `hexToRgba(hex, alpha)` helper function that converts a 6-digit hex colour
+to an `rgba()` string. Replaced `fillcolor:col+"28"` (8-digit hex `#1a3a5c28`) with
+`fillcolor:hexToRgba(col, 0.16)` (produces `rgba(26,58,92,0.16)`). Plotly 2.26.2
+does not reliably parse `#RRGGBBAA` hex format; `rgba()` is the documented standard.
+
+**Fix 2 — ribbon polygon downsampling (secondary bug)**
+Added a `downsample(arr, n)` helper that takes every nth element. For the daily
+timescale, the CI ribbon is now drawn at weekly resolution (every 7th day), reducing
+the closed polygon from 18,992 points (~26 years × 365 days × 2) to ~2,714 points
+(~1,357 weekly samples × 2). The median SSEM line remains at full daily resolution.
+Monthly, annual, and sub-daily panels are not affected.
+
+### Files changed
+- `exercises/build_dashboard.R`: added `hexToRgba()` and `downsample()` helpers;
+  updated `ribbon()` signature to `ribbon(xRibbon, xMed, med, lo, hi, name, col)`;
+  updated the daily getTraces() call to pass downsampled CI arrays.
+- `exercises/dashboard.html`: rebuilt, 7,450,977 bytes (7.5 MB).
+- `exercises/student_data/Tuesday_AM_SSEM_part1/dashboard.html`: staging copy updated.
+- Google Drive zip: `Tuesday_AM_SSEM_part1.zip` updated via `zip -u` to add
+  `Tuesday_AM_SSEM_part1/dashboard.html` (7.5 MB uncompressed, deflated 68%);
+  zip now 703 MB.
+
+### Verification
+- `hexToRgba()` function: present in output HTML
+- `downsample()` function: present in output HTML
+- `fillcolor:hexToRgba(col, 0.16)`: present in output HTML
+- `col+"28"` (old 8-digit hex): absent from output HTML
+- `const step = 7`: present in output HTML
+- `downsample(dd.dates, step)`: present in output HTML
+- `id="cb_ssem_ci" checked`: present in output HTML
+- File size: 7.5 MB (within 20 MB limit)

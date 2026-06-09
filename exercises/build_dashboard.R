@@ -537,14 +537,34 @@ function cb(id) { const el = document.getElementById(id); return el && el.checke
 
 /* ── Trace builders ──────────────────────────────────────────────────────── */
 
-/* Shaded ribbon for SSEM 95% CI — low opacity fill, no legend entry        */
-function ribbon(x, med, lo, hi, name, col) {
+/* Convert 6-digit hex colour to rgba() string with the given alpha (0–1).   */
+/* Plotly requires rgba() or 6-digit hex; 8-digit hex (#RRGGBBAA) is not      */
+/* reliably parsed by the tinycolor2 bundled in Plotly 2.26.2.                */
+function hexToRgba(hex, alpha) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return "rgba(" + r + "," + g + "," + b + "," + alpha + ")";
+}
+
+/* Take every nth element from an array — used to downsample the CI ribbon    */
+/* polygon so Plotly can fill it reliably on large multi-year records.         */
+function downsample(arr, n) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += n) out.push(arr[i]);
+  return out;
+}
+
+/* Shaded ribbon for SSEM 95% CI — low opacity fill, no legend entry.         */
+/* xRibbon: x coords for the fill polygon (may be coarser than xMed).         */
+/* xMed:    x coords for the median line (full resolution).                   */
+function ribbon(xRibbon, xMed, med, lo, hi, name, col) {
   return [
-    {x: x.concat(x.slice().reverse()),
+    {x: xRibbon.concat(xRibbon.slice().reverse()),
      y: hi.concat(lo.slice().reverse()),
-     fill:"toself", fillcolor:col+"28", line:{width:0},
+     fill:"toself", fillcolor:hexToRgba(col, 0.16), line:{width:0},
      type:"scatter", mode:"lines", showlegend:false, hoverinfo:"skip", name:name+" CI"},
-    {x, y:med, type:"scatter", mode:"lines",
+    {x: xMed, y:med, type:"scatter", mode:"lines",
      line:{color:col, width:LW.ssem_med}, name:name}
   ];
 }
@@ -585,8 +605,16 @@ function getTraces() {
 
     /* SSEM ribbon / median line */
     if (vc.streams.includes("ssem") && f && dd[f+"_med"]) {
-      if (cb("cb_ssem_ci"))
-        t.push(...ribbon(dd.dates, dd[f+"_med"], dd[f+"_lo"], dd[f+"_hi"], "SSEM", C.ssem));
+      if (cb("cb_ssem_ci")) {
+        /* Downsample CI ribbon to weekly (every 7th day) — reduces the closed */
+        /* polygon from ~18,992 to ~2,714 points so Plotly fills it reliably.  */
+        /* The median line stays at full daily resolution.                      */
+        const step = 7;
+        t.push(...ribbon(
+          downsample(dd.dates, step), dd.dates, dd[f+"_med"],
+          downsample(dd[f+"_lo"], step), downsample(dd[f+"_hi"], step),
+          "SSEM", C.ssem));
+      }
       else if (cb("cb_ssem_med"))
         t.push(line_trace(dd.dates, dd[f+"_med"], C.ssem, "SSEM", "solid", LW.ssem_med));
     }
