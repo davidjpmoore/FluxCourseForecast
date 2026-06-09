@@ -4,13 +4,15 @@
 # Generates exercises/dashboard.html: a self-contained offline HTML dashboard
 # embedding all data, Plotly.js, and interactive JS/CSS in one file.
 #
+# Sites: US-NR1, US-MMS (with SSEM); DE-Tha, DK-Sor (FLUXNET/FLUXCOM/CMIP6 only)
+#
 # Data sources:
-#   SSEM (sub-daily)   : exercises use 2008 single-year RDS files; clearly
-#                        labelled as a representative year
-#   SSEM (daily+)      : full-record RDS from exercises/run_full_record.R
-#   FLUXNET daily      : full available record (all years in the DD CSV)
-#   FLUXCOM monthly    : 2001–2021 (unchanged)
-#   CMIP6 monthly      : 1980–2021 (unchanged)
+#   SSEM (sub-daily)   : 2008 single-year RDS files (US-NR1, US-MMS only)
+#   SSEM (daily+)      : full-record RDS from exercises/run_full_record.R (US-NR1, US-MMS)
+#   FLUXNET sub-daily  : 2008 from HH/HR CSVs, all four sites, thinned every 4th step
+#   FLUXNET daily      : DD CSVs filtered to 2000-2025
+#   FLUXCOM monthly    : 2001-2021 (all four sites)
+#   CMIP6 monthly      : filtered to 2000-2021 (all four sites)
 #
 # Run from the repo root:  Rscript exercises/build_dashboard.R
 # Output:                  exercises/dashboard.html
@@ -149,6 +151,19 @@ proc_ssem_full <- function(rds_path, site_id) {
   # ── Aggregate to daily ──────────────────────────────────────────────────
   dd <- agg_to_daily(arr, spd, step_s)
 
+  # ── Trim to 2000-2025 ───────────────────────────────────────────────────
+  # The first two SSEM years (1998-1999) serve as carbon pool spin-up.
+  # Removing them keeps the displayed record within the 2000-2025 window
+  # used consistently across all data sources in this dashboard.
+  keep        <- all_dates_d >= "2000-01-01" & all_dates_d <= "2025-12-31"
+  all_dates_d <- all_dates_d[keep]
+  trim_ci <- function(ci) list(lo = ci$lo[keep], med = ci$med[keep], hi = ci$hi[keep])
+  dd$gpp  <- trim_ci(dd$gpp)
+  dd$nee  <- trim_ci(dd$nee)
+  dd$rh   <- trim_ci(dd$rh)
+  dd$ra   <- trim_ci(dd$ra)
+  dd$lai  <- trim_ci(dd$lai)
+
   # ── Monthly aggregation: average daily values within each year-month ────
   # 'ym' is a character vector like "1998-01", "1998-01", ..., "2023-12"
   # One value per calendar day.
@@ -205,8 +220,9 @@ proc_fluxnet <- function(csv_path, site_id) {
 
   df <- read_csv(csv_path, show_col_types = FALSE) |>
     mutate(across(where(is.numeric), ~ replace(., . == -9999, NA))) |>
-    mutate(date = as.Date(as.character(DATE)))
-  # No year filter — load the full observational record
+    mutate(date = as.Date(as.character(DATE))) |>
+    # Limit to 2000-2025 to match the global date range of the dashboard
+    filter(date >= as.Date("2000-01-01"), date <= as.Date("2025-12-31"))
 
   # Carbon fluxes: μmol m-2 s-1 × 86400 s/d × 12.011e-6 g/μmol = gC m-2 d-1
   C    <- UMOL_TO_GC_PER_S * 86400
@@ -293,6 +309,8 @@ proc_fluxcom <- function(csv_path) {
 proc_cmip6 <- function(csv_path, model_name) {
   cat(sprintf("  CMIP6 [%s] %s...\n", model_name, basename(csv_path)))
   df <- read_csv(csv_path, show_col_types = FALSE) |>
+    # Trim CMIP6 to 2000-2021; pre-2000 historical data is outside the dashboard window
+    filter(year >= 2000L) |>
     mutate(
       date = as.Date(paste(year, month, "01", sep = "-")),
       days = days_in_month(date),
@@ -335,6 +353,69 @@ proc_cmip6 <- function(csv_path, model_name) {
 
 
 # =============================================================================
+# FLUXNET sub-daily processor — 2008 only, all four sites
+# =============================================================================
+# Loads 2008 half-hourly (or hourly for US-MMS) NEE and met observations.
+# QC flag is retained so the dashboard can colour-code points by data quality.
+# Only the needed columns are read to keep memory use manageable — HH files
+# are 600-700 MB but col_select lets readr skip unwanted columns.
+#
+# Returns NULL if no data is found for the requested year.
+
+proc_fluxnet_subdaily <- function(csv_path, site_id, year = 2008L) {
+  cat(sprintf("  FLUXNET sub-daily %d [%s] %s...\n", year, site_id, basename(csv_path)))
+  is_nr1  <- site_id == "US-NR1"
+  is_mms  <- site_id == "US-MMS"
+  nee_col <- if (is_nr1) "NEE_CUT_REF"    else "NEE_VUT_REF"
+  nee_qc  <- if (is_nr1) "NEE_CUT_REF_QC" else "NEE_VUT_REF_QC"
+  ts_col  <- if (is_mms) "TIMESTAMP_START" else "DATETIME_START"
+
+  # Read only the 7 needed columns; avoids loading the full 200-column HH file
+  df <- read_csv(csv_path, show_col_types = FALSE,
+                 col_select = any_of(c(ts_col, nee_col, nee_qc,
+                                       "SW_IN_F", "TA_F", "LE_F_MDS", "H_F_MDS"))) |>
+    mutate(across(where(is.numeric), ~ replace(., . == -9999, NA)))
+
+  # Parse timestamp to POSIXct — two formats depending on site
+  if (is_mms) {
+    # US-MMS HR: TIMESTAMP_START is an integer YYYYMMDDHHMM (e.g. 200801010000)
+    df <- df |>
+      mutate(dt = as.POSIXct(strptime(as.character(.data[[ts_col]]),
+                                       "%Y%m%d%H%M", tz = "UTC")))
+  } else {
+    # HH sites (US-NR1, DE-Tha, DK-Sor): DATETIME_START is ISO 8601 with Z suffix;
+    # readr already parses it as POSIXct so we just rename the column
+    df <- df |> mutate(dt = .data[[ts_col]])
+  }
+
+  # Filter to the target year
+  df <- df |> filter(year(dt) == year)
+
+  if (nrow(df) == 0L) {
+    warning(sprintf("proc_fluxnet_subdaily: no data for %d in %s", year, basename(csv_path)))
+    return(NULL)
+  }
+
+  # Thin to every 4th timestep — consistent with SSEM sub-daily thinning:
+  #   HH sites (48 steps/day): every 4th -> 12 points/day (2-hourly equivalent)
+  #   HR sites (24 steps/day): every 4th ->  6 points/day (4-hourly equivalent)
+  si <- seq(1L, nrow(df), 4L)
+  df <- df[si, ]
+
+  list(
+    dates  = format(df$dt, "%Y-%m-%dT%H:%M", tz = "UTC"),
+    nee    = rnd(df[[nee_col]], 3),
+    nee_qc = as.integer(df[[nee_qc]]),
+    sw     = rnd(df$SW_IN_F,  2),
+    ta     = rnd(df$TA_F,     2),
+    le     = rnd(df$LE_F_MDS, 2),
+    h      = rnd(df$H_F_MDS,  2),
+    et     = rnd(df$LE_F_MDS * LE_TO_MM_DAY, 3)
+  )
+}
+
+
+# =============================================================================
 # Assemble all data
 # =============================================================================
 
@@ -370,17 +451,34 @@ cat("Processing SSEM full-record (daily/monthly/annual)...\n")
 nr1_full <- proc_ssem_full(nr1_full_rds, "US-NR1")
 mms_full <- proc_ssem_full(mms_full_rds, "US-MMS")
 
-# ── Process FLUXNET (full record) ─────────────────────────────────────────────
-cat("Processing FLUXNET (full record)...\n")
-nr1_fluxnet <- proc_fluxnet(file.path(DATA_DIR, "US-NR1", "US-NR1_DD.csv"), "US-NR1")
-mms_fluxnet <- proc_fluxnet(file.path(DATA_DIR, "US-MMS", "US-MMS_DD.csv"), "US-MMS")
+# ── Process FLUXNET daily (full record, filtered to 2000-2025) ────────────────
+cat("Processing FLUXNET daily (full record)...\n")
+nr1_fluxnet    <- proc_fluxnet(file.path(DATA_DIR, "US-NR1", "US-NR1_DD.csv"), "US-NR1")
+mms_fluxnet    <- proc_fluxnet(file.path(DATA_DIR, "US-MMS", "US-MMS_DD.csv"), "US-MMS")
+detha_fluxnet  <- proc_fluxnet(file.path(DATA_DIR, "DE-Tha", "DE-Tha_DD.csv"), "DE-Tha")
+dksor_fluxnet  <- proc_fluxnet(file.path(DATA_DIR, "DK-Sor", "DK-Sor_DD.csv"), "DK-Sor")
 
-# ── Process FLUXCOM (unchanged) ───────────────────────────────────────────────
+# ── Process FLUXNET sub-daily (2008, all four sites) ─────────────────────────
+# Note: HH files are 600-700 MB; col_select limits the columns read but the
+# full file is still scanned, so this step takes ~60 s total across four sites.
+cat("Processing FLUXNET 2008 sub-daily (all sites)...\n")
+nr1_fluxnet_sd   <- proc_fluxnet_subdaily(
+  file.path(DATA_DIR, "US-NR1", "US-NR1_HH.csv"), "US-NR1")
+mms_fluxnet_sd   <- proc_fluxnet_subdaily(
+  file.path(DATA_DIR, "US-MMS", "US-MMS_HR.csv"), "US-MMS")
+detha_fluxnet_sd <- proc_fluxnet_subdaily(
+  file.path(DATA_DIR, "DE-Tha", "DE-Tha_HH.csv"), "DE-Tha")
+dksor_fluxnet_sd <- proc_fluxnet_subdaily(
+  file.path(DATA_DIR, "DK-Sor", "DK-Sor_HH.csv"), "DK-Sor")
+
+# ── Process FLUXCOM (all four sites) ─────────────────────────────────────────
 cat("Processing FLUXCOM...\n")
-nr1_fluxcom <- proc_fluxcom(file.path(DATA_DIR, "fluxcom", "US-NR1_fluxcom_monthly.csv"))
-mms_fluxcom <- proc_fluxcom(file.path(DATA_DIR, "fluxcom", "US-MMS_fluxcom_monthly.csv"))
+nr1_fluxcom   <- proc_fluxcom(file.path(DATA_DIR, "fluxcom", "US-NR1_fluxcom_monthly.csv"))
+mms_fluxcom   <- proc_fluxcom(file.path(DATA_DIR, "fluxcom", "US-MMS_fluxcom_monthly.csv"))
+detha_fluxcom <- proc_fluxcom(file.path(DATA_DIR, "fluxcom", "DE-Tha_fluxcom_monthly.csv"))
+dksor_fluxcom <- proc_fluxcom(file.path(DATA_DIR, "fluxcom", "DK-Sor_fluxcom_monthly.csv"))
 
-# ── Process CMIP6 (unchanged) ─────────────────────────────────────────────────
+# ── Process CMIP6 (all four sites, filtered to 2000-2021) ────────────────────
 cat("Processing CMIP6...\n")
 nr1_cmip6 <- list(
   CESM2          = proc_cmip6(file.path(DATA_DIR, "cmip6", "CESM2_usnr1_monthly.csv"),         "CESM2"),
@@ -391,6 +489,16 @@ mms_cmip6 <- list(
   CESM2          = proc_cmip6(file.path(DATA_DIR, "cmip6", "CESM2_usmms_monthly.csv"),         "CESM2"),
   `IPSL-CM6A-LR` = proc_cmip6(file.path(DATA_DIR, "cmip6", "IPSL-CM6A-LR_usmms_monthly.csv"), "IPSL-CM6A-LR"),
   `UKESM1-0-LL`  = proc_cmip6(file.path(DATA_DIR, "cmip6", "UKESM1-0-LL_usmms_monthly.csv"),  "UKESM1-0-LL")
+)
+detha_cmip6 <- list(
+  CESM2          = proc_cmip6(file.path(DATA_DIR, "cmip6", "CESM2_detha_monthly.csv"),         "CESM2"),
+  `IPSL-CM6A-LR` = proc_cmip6(file.path(DATA_DIR, "cmip6", "IPSL-CM6A-LR_detha_monthly.csv"), "IPSL-CM6A-LR"),
+  `UKESM1-0-LL`  = proc_cmip6(file.path(DATA_DIR, "cmip6", "UKESM1-0-LL_detha_monthly.csv"),  "UKESM1-0-LL")
+)
+dksor_cmip6 <- list(
+  CESM2          = proc_cmip6(file.path(DATA_DIR, "cmip6", "CESM2_dksor_monthly.csv"),         "CESM2"),
+  `IPSL-CM6A-LR` = proc_cmip6(file.path(DATA_DIR, "cmip6", "IPSL-CM6A-LR_dksor_monthly.csv"), "IPSL-CM6A-LR"),
+  `UKESM1-0-LL`  = proc_cmip6(file.path(DATA_DIR, "cmip6", "UKESM1-0-LL_dksor_monthly.csv"),  "UKESM1-0-LL")
 )
 
 # ── Assemble the data object passed to the dashboard ─────────────────────────
@@ -407,9 +515,10 @@ all_data <- list(
       monthly  = nr1_full$monthly,
       annual   = nr1_full$annual
     ),
-    fluxnet = nr1_fluxnet,
-    fluxcom = nr1_fluxcom,
-    cmip6   = nr1_cmip6
+    fluxnet    = nr1_fluxnet,
+    fluxnet_sd = nr1_fluxnet_sd,
+    fluxcom    = nr1_fluxcom,
+    cmip6      = nr1_cmip6
   ),
   `US-MMS` = list(
     meta    = list(
@@ -423,9 +532,34 @@ all_data <- list(
       monthly  = mms_full$monthly,
       annual   = mms_full$annual
     ),
-    fluxnet = mms_fluxnet,
-    fluxcom = mms_fluxcom,
-    cmip6   = mms_cmip6
+    fluxnet    = mms_fluxnet,
+    fluxnet_sd = mms_fluxnet_sd,
+    fluxcom    = mms_fluxcom,
+    cmip6      = mms_cmip6
+  ),
+  `DE-Tha` = list(
+    meta    = list(
+      label    = "DE-Tha -- Tharandt, Germany (ENF, European temperate coniferous)",
+      site     = "DE-Tha",
+      nee_note = "NEE_VUT_REF (variable u* threshold method)"
+    ),
+    ssem       = NULL,             # No SSEM run performed for this site
+    fluxnet    = detha_fluxnet,
+    fluxnet_sd = detha_fluxnet_sd,
+    fluxcom    = detha_fluxcom,
+    cmip6      = detha_cmip6
+  ),
+  `DK-Sor` = list(
+    meta    = list(
+      label    = "DK-Sor -- Sorø, Denmark (DBF, European temperate deciduous)",
+      site     = "DK-Sor",
+      nee_note = "NEE_VUT_REF (variable u* threshold method)"
+    ),
+    ssem       = NULL,             # No SSEM run performed for this site
+    fluxnet    = dksor_fluxnet,
+    fluxnet_sd = dksor_fluxnet_sd,
+    fluxcom    = dksor_fluxcom,
+    cmip6      = dksor_cmip6
   )
 )
 
@@ -588,23 +722,60 @@ function getTraces() {
   const f  = vc.field;
   const t  = [];
 
-  /* ── Sub-daily (2008 representative year, SSEM only) ─────────────────── */
+  /* ── Sub-daily (2008 representative year) ────────────────────────────── */
   if (ts === "subdaily") {
-    if (vc.streams.includes("ssem") && f) {
-      const sd = d.ssem.subdaily;
-      if (cb("cb_ssem_med") && sd[f])
-        t.push(line_trace(sd.dates, sd[f], C.ssem, "SSEM 2008", "solid", LW.ssem_med));
+    /* SSEM median line (US-NR1 and US-MMS only; d.ssem is null for other sites) */
+    const sd = d.ssem ? d.ssem.subdaily : null;
+    if (sd && vc.streams.includes("ssem") && f && cb("cb_ssem_med") && sd[f])
+      t.push(line_trace(sd.dates, sd[f], C.ssem, "SSEM 2008", "solid", LW.ssem_med));
+
+    /* FLUXNET sub-daily 2008 — scatter, coloured by NEE QC flag (0-3) */
+    if (cb("cb_fluxnet_sd") && d.fluxnet_sd) {
+      const fsd = d.fluxnet_sd;
+      /* QC colour key: 0=measured (black), 1=high-quality gap-fill (green),
+         2=medium-quality (orange), 3=low-quality (red) */
+      const QC_COL  = ["#000000", "#27ae60", "#e67e22", "#c0392b"];
+      const QC_LABL = [
+        "FLUXNET QC=0 (measured)",
+        "FLUXNET QC=1 (gap-filled, high quality)",
+        "FLUXNET QC=2 (gap-filled, medium quality)",
+        "FLUXNET QC=3 (gap-filled, low quality)"
+      ];
+      if (vari === "NEE" && fsd.nee) {
+        /* One trace per QC level so Plotly assigns a distinct legend entry */
+        [0,1,2,3].forEach(q => {
+          const idx = [];
+          fsd.nee_qc.forEach((v,i) => { if (v === q) idx.push(i); });
+          if (idx.length > 0)
+            t.push({
+              x: idx.map(i => fsd.dates[i]),
+              y: idx.map(i => fsd.nee[i]),
+              type:"scatter", mode:"markers",
+              marker:{color:QC_COL[q], size:2, opacity:0.7},
+              name:QC_LABL[q], showlegend:true
+            });
+        });
+      }
+      if (vari === "Energy") {
+        /* Show SW, LE, H as lines; no QC colouring for energy */
+        [["sw",C.sw,"SW_IN"],["le",C.le,"LE"],["h",C.h_,"H"]].forEach(([fld,col,nm]) => {
+          if (fsd[fld]) t.push(line_trace(fsd.dates, fsd[fld], col, "FLUXNET "+nm, "solid", LW.fluxnet));
+        });
+      }
+      if (vari === "ET" && fsd.et)
+        t.push(line_trace(fsd.dates, fsd.et, C.fluxnet, "FLUXNET ET", "solid", LW.fluxnet));
     }
     return t;
   }
 
   /* ── Daily (full record) ─────────────────────────────────────────────── */
   if (ts === "daily") {
-    const dd = d.ssem.daily;
+    /* d.ssem is null for sites without an SSEM run (DE-Tha, DK-Sor) */
+    const dd = d.ssem ? d.ssem.daily : null;
     const fd = d.fluxnet.daily;
 
     /* SSEM ribbon / median line */
-    if (vc.streams.includes("ssem") && f && dd[f+"_med"]) {
+    if (dd && vc.streams.includes("ssem") && f && dd[f+"_med"]) {
       if (cb("cb_ssem_ci")) {
         /* Downsample CI ribbon to weekly (every 7th day) — reduces the closed */
         /* polygon from ~18,992 to ~2,714 points so Plotly fills it reliably.  */
@@ -636,12 +807,13 @@ function getTraces() {
 
   /* ── Monthly (full record) ───────────────────────────────────────────── */
   if (ts === "monthly") {
-    const sm  = d.ssem.monthly;
+    /* d.ssem is null for sites without SSEM; guard before accessing .monthly */
+    const sm  = d.ssem ? d.ssem.monthly : null;
     const fm  = d.fluxnet.monthly;
     const fc  = d.fluxcom.monthly;
     const cms = d.cmip6;
 
-    if (vc.streams.includes("ssem") && f && sm[f] && cb("cb_ssem_med"))
+    if (sm && vc.streams.includes("ssem") && f && sm[f] && cb("cb_ssem_med"))
       t.push(line_trace(sm.dates, sm[f], C.ssem, "SSEM", "solid", LW.ssem_med));
 
     if (vc.streams.includes("fluxnet") && f && fm[f] && cb("cb_fluxnet") && vari!=="Energy")
@@ -670,8 +842,8 @@ function getTraces() {
     const fa  = d.fluxcom.annual;
     const cms = d.cmip6;
 
-    /* SSEM annual: line+markers over all years */
-    if (vc.streams.includes("ssem") && f && cb("cb_ssem_med")) {
+    /* SSEM annual: US-NR1 and US-MMS only; d.ssem.annual absent for other sites */
+    if (d.ssem && d.ssem.annual && vc.streams.includes("ssem") && f && cb("cb_ssem_med")) {
       const ann = d.ssem.annual;
       const yv  = f==="lai" ? ann.lai_avg : (f ? ann[f] : null);
       if (yv) t.push(lm_trace(ann.year.map(String), yv, C.ssem, "SSEM", "solid", LW.ssem_med));
@@ -738,12 +910,13 @@ function updateStats() {
   const na = v => { document.getElementById("val_"+v).textContent="--"; };
   const set = (v,x) => { document.getElementById("val_"+v).textContent=x; };
 
-  if (!f || !["NEE","GPP"].includes(vari) || ts!=="daily") {
+  /* Stats require SSEM daily data — guard for sites without SSEM (DE-Tha, DK-Sor) */
+  const dd = DATA[site].ssem ? DATA[site].ssem.daily : null;
+  if (!dd || !f || !["NEE","GPP"].includes(vari) || ts!=="daily") {
     ["rmse","bias","r"].forEach(na);
     set("n_pts","--");
     return;
   }
-  const dd = DATA[site].ssem.daily;
   const fd = DATA[site].fluxnet.daily;
   const s  = dd[f+"_med"], o = fd[f];
   if (!s || !o) { ["rmse","bias","r"].forEach(na); return; }
@@ -819,6 +992,8 @@ html_controls <- '
     <div class="br" id="siteBtns">
       <button class="btn on" data-s="US-NR1" onclick="setSite(\'US-NR1\')">US-NR1</button>
       <button class="btn"    data-s="US-MMS" onclick="setSite(\'US-MMS\')">US-MMS</button>
+      <button class="btn"    data-s="DE-Tha" onclick="setSite(\'DE-Tha\')">DE-Tha</button>
+      <button class="btn"    data-s="DK-Sor" onclick="setSite(\'DK-Sor\')">DK-Sor</button>
     </div>
   </div>
   <div class="cg">
@@ -860,7 +1035,11 @@ html_controls <- '
     </label>
     <label class="cbl">
       <input type="checkbox" id="cb_fluxnet" checked onchange="update()">
-      <span class="dot" style="background:#c0392b"></span>FLUXNET obs
+      <span class="dot" style="background:#c0392b"></span>FLUXNET daily obs
+    </label>
+    <label class="cbl">
+      <input type="checkbox" id="cb_fluxnet_sd" checked onchange="update()">
+      <span class="dot" style="background:#c0392b;opacity:.6"></span>FLUXNET sub-daily (2008)
     </label>
     <label class="cbl">
       <input type="checkbox" id="cb_fluxcom" checked onchange="update()">
@@ -898,23 +1077,25 @@ html_docs <- '
   <div class="db" id="docsBody">
     <table>
       <tr><th>Stream</th><th>Source</th><th>Temporal res.</th><th>Spatial scale</th><th>Units (dashboard)</th><th>Available variables</th></tr>
-      <tr><td>SSEM median / CI</td><td>Super Simple Ecosystem Model (Dietze lab)</td><td>Sub-daily (2008 representative year); daily / monthly / annual (full record 1998–2023)</td><td>Point (forest stand, ~1 ha)</td><td>gC m-2 d-1 (daily+); umol m-2 s-1 (sub-daily)</td><td>GPP, NEE, Rh, LAI</td></tr>
-      <tr><td>FLUXNET obs</td><td>AmeriFlux FLUXNET product: US-NR1 and US-MMS</td><td>Daily (DD product, full observational record)</td><td>Tower footprint (~0.5-2 km2)</td><td>gC m-2 d-1 (C fluxes); W m-2 (energy); mm d-1 (ET)</td><td>NEE, GPP, RECO, LE, H, SW_IN, LW_IN, ET</td></tr>
+      <tr><td>SSEM median / CI</td><td>Super Simple Ecosystem Model (Dietze lab)</td><td>Sub-daily (2008 representative year); daily / monthly / annual (full record 2000–2023)</td><td>Point (forest stand, ~1 ha)</td><td>gC m-2 d-1 (daily+); umol m-2 s-1 (sub-daily)</td><td>GPP, NEE, Rh, LAI — US-NR1 and US-MMS only</td></tr>
+      <tr><td>FLUXNET daily obs</td><td>AmeriFlux / ICOS FLUXNET product: all four sites</td><td>Daily (DD product, 2000-2025)</td><td>Tower footprint (~0.5-2 km2)</td><td>gC m-2 d-1 (C fluxes); W m-2 (energy); mm d-1 (ET)</td><td>NEE, GPP, RECO, LE, H, SW_IN, LW_IN, ET</td></tr>
+      <tr><td>FLUXNET sub-daily (2008)</td><td>AmeriFlux / ICOS FLUXNET product: all four sites</td><td>Sub-daily (2008 only; thinned to every 4th step)</td><td>Tower footprint</td><td>umol m-2 s-1 (NEE); W m-2 (LE, H, SW)</td><td>NEE (QC-coloured), LE, H, SW_IN, ET</td></tr>
       <tr><td>FLUXCOM</td><td>FLUXCOM-X-BASE (Nelson et al. 2024, Biogeosciences)</td><td>Monthly (2001-2021)</td><td>0.5 deg grid cell (~50 km)</td><td>gC m-2 d-1 (mean daily rate for month)</td><td>GPP, NEE, TER, ET</td></tr>
-      <tr><td>CMIP6 CESM2</td><td>CESM2 (NCAR), Pangeo CMIP6 cloud archive</td><td>Monthly (1980-2021)</td><td>~1 deg grid cell (~100 km)</td><td>gC m-2 d-1 (mean daily rate); W m-2 (energy)</td><td>GPP, Rh, NEE, LAI, LE, H, ET</td></tr>
+      <tr><td>CMIP6 CESM2</td><td>CESM2 (NCAR), Pangeo CMIP6 cloud archive</td><td>Monthly (2000-2021)</td><td>~1 deg grid cell (~100 km)</td><td>gC m-2 d-1 (mean daily rate); W m-2 (energy)</td><td>GPP, Rh, NEE, LAI, LE, H, ET</td></tr>
       <tr><td>CMIP6 IPSL-CM6A-LR</td><td>IPSL-CM6A-LR (IPSL), Pangeo CMIP6 cloud archive</td><td>Monthly</td><td>~1 deg grid cell</td><td>same as CESM2</td><td>same as CESM2</td></tr>
       <tr><td>UKESM1-0-LL</td><td>UKESM1-0-LL (MOHC), Pangeo CMIP6 cloud archive</td><td>Monthly (historical ends ~2014)</td><td>~1 deg grid cell</td><td>same as CESM2</td><td>same as CESM2</td></tr>
     </table>
-    <div class="cav"><strong>Sub-daily timescale:</strong> Only 2008 is shown at sub-daily resolution (thinned to every 4th timestep), and only SSEM output is available at this timescale. FLUXNET sub-daily data are excluded from the dashboard to keep file size manageable.</div>
+    <div class="cav"><strong>Sub-daily timescale:</strong> 2008 only. SSEM output is available for US-NR1 and US-MMS. FLUXNET sub-daily observations (thinned to every 4th timestep) are available for all four sites. NEE points are colour-coded by QC flag: black=measured (QC=0), green=high-quality gap-fill (QC=1), orange=medium-quality (QC=2), red=low-quality (QC=3).</div>
     <div class="cav"><strong>CESM2 scenario:</strong> SSP3-7.0 (ssp370) was used for CESM2 instead of SSP2-4.5 because the SSP2-4.5 run for the US-MMS grid cell was unavailable at time of extraction. Future-period CESM2 projections use a higher-emissions pathway than the other models.</div>
     <div class="cav"><strong>UKESM1-0-LL:</strong> Only historical output (ending approximately 2014) is present in the pre-extracted CSVs. Future-period months are absent. This is a data-availability limitation, not a model property.</div>
     <div class="cav"><strong>US-NR1 NEE:</strong> NEE_CUT_REF (constant u* threshold method) is used instead of NEE_VUT_REF because the variable u* method was not applied to this site in the provided data product. GPP and RECO use the corresponding CUT nighttime-partitioning method.</div>
     <div class="cav"><strong>Spatial scale hierarchy:</strong> SSEM simulates one forest stand (tower footprint, sub-km). FLUXCOM integrates machine-learning estimates across a 0.5 deg cell (~50 km). CMIP6 models integrate across ~1 deg (~100 km). Absolute magnitude differences between streams partly reflect this spatial aggregation, not only model error.</div>
     <div class="cav"><strong>CMIP6 NEE derivation:</strong> NEE shown here is computed as Ra + Rh - GPP from model output, which equals -NEP. This approximation neglects land-use change fluxes and lateral carbon transport included in the model\'s NBP variable.</div>
     <p style="margin-top:10px;font-size:11px;color:#718096">
-      SSEM code: Dietze lab, BU (mdietze/FluxCourseForecast). FLUXNET data: CC-BY-4.0, AmeriFlux network.
+      SSEM code: Dietze lab, BU (mdietze/FluxCourseForecast). FLUXNET data: CC-BY-4.0, AmeriFlux network and ICOS.
       FLUXCOM data: Nelson et al. (2024), doi:10.18160/5NZG-JMJE, CCBY4.
       CMIP6 data: respective modelling groups, PCMDI/CMIP6 terms of use.
+      Sites: US-NR1 (Niwot Ridge), US-MMS (Morgan Monroe), DE-Tha (Tharandt), DK-Sor (Sor&oslash;). Data 2000&ndash;2025.
     </p>
   </div>
 </div>'
