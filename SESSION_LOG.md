@@ -432,7 +432,47 @@ Verified date ranges in output JSON:
 - [x] DE-Tha and DK-Sor have `ssem: {}` in JSON (not null — jsonlite serialises NULL list as {}); JS guards handle this
 - [x] File size 9.5 MB < 20 MB
 
-### Fix 2: SSEM 95% CI ribbon — two bugs corrected in build_dashboard.R
+---
+
+## [2026-06-09] Task: Build dashboard zip (Tuesday_AM_SSEM_dashboard.zip)
+
+### Output
+- `exercises/student_data/Tuesday_AM_SSEM_dashboard.zip`
+- Google Drive: `FLUXCOURSE 2026 Shared Resources/Week 2 Instructional Materials/Tuesday_AM_SSEM_dashboard.zip`
+- Compressed size: 1.7 GB (44 files; 3,375 MB uncompressed)
+
+### Contents
+```
+Tuesday_AM_SSEM_dashboard/
+  dashboard.html               9.1 MB  (self-contained, no internet required)
+  README.md                           (open/rebuild instructions + caveats)
+  data/
+    US-NR1/  US-NR1_DD.csv (14 MB)  US-NR1_HH.csv (451 MB)
+    US-MMS/  US-MMS_DD.csv (20 MB)  US-MMS_HR.csv (284 MB)
+    DE-Tha/  DE-Tha_DD.csv (23 MB)  DE-Tha_HH.csv (694 MB)
+    DK-Sor/  DK-Sor_DD.csv (22 MB)  DK-Sor_HH.csv (682 MB)
+    cmip6/   12 monthly CSVs (~0.1 MB each)
+    fluxcom/ 4 monthly CSVs (~22 KB each)
+    ssem/    ssem_usnr1_fullrecord.rds (548 MB)
+             ssem_usmms_fullrecord.rds (280 MB)
+             ssem_usnr1_2008.rds (125 MB)
+             ssem_usmms_2008.rds (64 MB)
+    scripts/ build_dashboard.R  run_full_record.R  functions.R  utils.R
+```
+
+### Compression
+- HH/HR CSV files (already text): deflated 65-71%
+- RDS files (already xz-compressed): stored 0% (no further compression)
+- Overall: 3,375 MB → 1,700 MB compressed
+
+### Google Drive
+Uploaded to `Week 2 Instructional Materials/Tuesday_AM_SSEM_dashboard.zip`
+(separate from the existing `Tuesday_AM_SSEM_part1.zip` which contains
+the full exercise package with student exercise Rmd files)
+
+---
+
+## [2026-06-09] Fix: SSEM 95% CI ribbon — two bugs corrected in build_dashboard.R
 
 ### Approved changes
 
