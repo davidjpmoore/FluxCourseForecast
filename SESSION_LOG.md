@@ -365,7 +365,74 @@ No fix has been applied. Awaiting approval before modifying any files.
 
 ---
 
-## [2026-06-09] Fix: SSEM 95% CI ribbon — two bugs corrected in build_dashboard.R
+## [2026-06-09] Fixes 1–4: ribbon, subdaily FLUXNET, four sites, 2000-2025 filter
+
+### Summary of changes
+
+**Fix 1 — fillcolor format (confirmed already complete from prior session)**
+`hexToRgba()` helper converts 6-digit hex to `rgba()` string. Confirmed present.
+
+**Fix 2 — ribbon polygon downsampling (confirmed already complete from prior session)**
+`downsample(arr, n)` reduces daily CI ribbon from 18,992 to ~2,714 polygon points. Confirmed present.
+
+**Fix 3 — FLUXNET sub-daily observations for 2008 (NEW)**
+Added `proc_fluxnet_subdaily()` function that reads 2008 HH/HR data for all four sites
+using `col_select` to keep memory use manageable on the 600-700 MB source files.
+Data thinned to every 4th timestep (consistent with SSEM sub-daily thinning).
+QC flag retained as integer array `nee_qc` (0=measured, 1=high, 2=medium, 3=low).
+
+In JS, the sub-daily FLUXNET rendering creates one scatter trace per QC level with
+colour coding: 0=black, 1=#27ae60 (green), 2=#e67e22 (orange), 3=#c0392b (red).
+Energy variables (SW, LE, H) and ET shown as lines for the Energy/ET variable selectors.
+
+Added "FLUXNET sub-daily (2008)" checkbox `id="cb_fluxnet_sd"` to sidebar.
+
+Subdaily point counts:
+- US-NR1: 4,392 points (HH/48 per day, every 4th = 12/day × 366 days)
+- US-MMS: 2,196 points (HR/24 per day, every 4th = 6/day × 366 days)
+- DE-Tha: 4,392 points
+- DK-Sor: 4,392 points
+
+**Fix 4 — 2000-2025 date filter (NEW)**
+- SSEM full-record: trimmed to 2000-2023 (removes 1998-1999 spin-up years)
+- FLUXNET daily: filtered to `date >= 2000-01-01 & date <= 2025-12-31`
+- CMIP6: filtered to `year >= 2000` (removes 1980-1999 historical run)
+- FLUXCOM: already 2001-2021, no change needed
+
+Verified date ranges in output JSON:
+- US-NR1 FLUXNET daily: 2000-01-01 to 2025-12-31
+- US-NR1 SSEM daily: 2000-01-01 to 2023-12-31
+- US-NR1 CESM2 monthly: 2000-01-01 to 2021-12-01
+
+**DE-Tha and DK-Sor added as site tabs (NEW)**
+- DE-Tha (Tharandt, Germany — ENF, European temperate coniferous)
+- DK-Sor (Sorø, Denmark — DBF, European temperate deciduous)
+- Both have FLUXNET daily, FLUXNET sub-daily 2008, FLUXCOM monthly, CMIP6 monthly
+- Neither has SSEM output (`ssem: NULL` in R, serialises as `{}` in JSON)
+- JS guards added: `d.ssem && d.ssem.annual &&` for annual section;
+  `d.ssem ? d.ssem.daily : null` pattern for daily/monthly/subdaily sections
+  (accessing `.daily` on an empty object returns `undefined`, which is falsy)
+
+### Files changed
+- `exercises/build_dashboard.R`: all four fixes plus DE-Tha/DK-Sor support
+- `exercises/dashboard.html`: rebuilt, 9,490,712 bytes (9.5 MB, within 20 MB)
+- `exercises/student_data/Tuesday_AM_SSEM_part1/dashboard.html`: staging copy updated
+- Google Drive zip: NOT rebuilt in this session (zip -u for dashboard only not re-run;
+  the staging dashboard.html is current but the zip on Google Drive still has the
+  previous dashboard.html from the prior session)
+
+### Verification checklist
+- [x] `hexToRgba()` and `downsample()` present in output HTML
+- [x] `fillcolor:hexToRgba(col, 0.16)` in fill trace; `col+"28"` absent
+- [x] All four sites present in DATA object
+- [x] `fluxnet_sd` present for all four sites (US-NR1 n=4392, US-MMS n=2196, DE-Tha n=4392, DK-Sor n=4392)
+- [x] FLUXNET daily starts 2000-01-01 for all sites
+- [x] SSEM daily starts 2000-01-01 (trim of 1998-1999)
+- [x] CMIP6 monthly starts 2000-01-01
+- [x] DE-Tha and DK-Sor have `ssem: {}` in JSON (not null — jsonlite serialises NULL list as {}); JS guards handle this
+- [x] File size 9.5 MB < 20 MB
+
+### Fix 2: SSEM 95% CI ribbon — two bugs corrected in build_dashboard.R
 
 ### Approved changes
 
