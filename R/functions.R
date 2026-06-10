@@ -40,7 +40,7 @@ SSEM.orig <- function(X, params, inputs, verbose=FALSE){
                         NEP = GPP - alloc[, 1] - Rh,
                         Ra = alloc[, 1], NPPw = alloc[, 2], NPPl = alloc[, 3],
                         Rh = Rh, litterfall = litterfall, mortality = mortality)
-    X = output[t, ,1:3] ## current state variables become the next initial conditions
+    X = matrix(output[t, ,1:3],ncol = 3) ## current state variables become the next initial conditions
     if((t %% 1440) == 0 && verbose) print(t)             ## counter: elapsed time (30*48 = approx 1 month)
   }
   output[is.nan(output)] = 0
@@ -70,7 +70,7 @@ nee.sensitivity = function(ns){
     theta_sa[,i] = quantile(params[,i],seq(0,1,length=ns))                   ## Vary one parameter
     sa.ensemble = SSEM(X = Xbar,
                        params = theta_sa,
-                       inputs = inputs[,2:3]) 
+                       inputs = inputs) 
     sa.nee = sa.ensemble[,,6]
     sa.stats[,"param"] = theta_sa[,i]
     sa.stats[,"mean"] = apply(sa.nee,2,mean)
@@ -134,16 +134,46 @@ plot_params <- function(params, hist.params = NULL){
   }
 }
 
+average_timesteps <- function(arr, n_steps) {
+  # Get original dimensions (1: Time, 2: Ensemble, 3: Variable)
+  dims <- dim(arr)
+  time_dim <- dims[1]
+  
+  # Group indices into numerical blocks (e.g., 1, 1, 1, 2, 2, 2...)
+  groups <- rep(1:ceiling(time_dim / n_steps), each = n_steps, length.out = time_dim)
+  
+  # FIX: Split a plain vector so 'idx' inside lapply is a pure numeric vector
+  time_list <- split(seq_len(time_dim), groups)
+  
+  # Calculate means per group (returns a 3D array with Time moved to the 3rd dimension)
+  result_array <- sapply(time_list, function(idx) {
+    apply(arr[idx, , , drop = FALSE], c(2, 3), mean, na.rm = TRUE)
+  }, simplify = "array")
+  
+  # result_array currently has dimensions: [Ensemble, Variable, Time]
+  # Bring Time back to the 1st position to match your original structure: [Time, Ensemble, Variable]
+  corrected_array <- aperm(result_array, c(3, 1, 2))
+  
+  return(corrected_array)
+}
 ## Basic time-series visualizations
 varnames <- c("Bleaf","Bwood","BSOM","LAI","GPP","NEP","Ra",
               "NPPw","NPPl","Rh","litterfall","mortality")
 units <- c("Mg/ha","Mg/ha","Mg/ha","m2/m2","umol/m2/sec","umol/m2/sec",
            "umol/m2/sec","umol/m2/sec","umol/m2/sec","umol/m2/sec",
            "Mg/ha/timestep","Mg/ha/timestep")
-plot_forecast <- function(out,sample=FALSE){
+##' timeseries plot of model outputs
+##' 
+##' @param out array of model outputs
+##' @param sample whether to plot a subsample of ensemble members as lines
+##' @param timestep number of timesteps to aggregate, default = 1 (no aggregation)
+plot_forecast <- function(out,sample=FALSE,timestep=1){
   if(sample){
     samp = sample.int(dim(out)[2],sample)
   } 
+  if(timestep > 1){
+    out = average_timesteps(out,timestep)
+  }
   for(i in 1:9){  ## loop over variables
     ci = apply(out[, , i], 1, quantile, c(0.025, 0.5, 0.975))   ## calculate CI over ensemble members
     plot(ci[2, ], main = varnames[i], 

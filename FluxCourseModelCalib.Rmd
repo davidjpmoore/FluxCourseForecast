@@ -201,7 +201,7 @@ system.time({
 *Plot timeseries*
 Here we'll visualize both the 95% interval estimate, the median (black) and a random sample of 5 ensemble members (red) as examples
 ```{r}
-plot_forecast(output.ensemble,sample=5)
+plot_forecast(output.ensemble,sample=5,timestep = 48) ## average over each 48 timesteps (=daily)
 ```
 
 If you like Ensemble Forecasting, you may also like...
@@ -226,26 +226,77 @@ nep = -flux$NEE_VUT_REF ## change sign convention
 nep.qc = flux$NEE_VUT_REF_QC
 nep.unc = flux$NEE_VUT_REF_JOINTUNC
 
-## plot timeseries
+## plot raw timeseries
 ylim = range(c(range(ci),range(nep,na.rm=TRUE)))
 plot(inputs$date,ci[2,],ylim=ylim,col=1,pch=18,cex=0.2)
 ciEnvelope(inputs$date, ci[1, ], ci[3, ], col = col.alpha("lightGrey", 0.5))
-points(inputs$date,nep,col=nep.qc+1,cex=0.02)
+points(inputs$date,nep,col=nep.qc+2,cex=0.02)
 legend("topright",legend=c("model",paste("QC",0:3)),
        pch = c(18,rep(1,4)),
-       col=  c(1,1:4))
+       col=  c(1,2:5))
 
-## predicted/observed plot
+## raw predicted/observed plot
 plot(ci[2,],nep,col=nep.qc+1,cex=0.2)
 abline(0,1,lty=2)
+
+## smoothed daily time series
+date = as_date(inputs$date)
+daily.nep = tapply(nep,date,mean,na.rm=TRUE)
+daily.orig = apply(output.ensemble[,,6],2,
+                         function(x){tapply(x,date,mean,na.rm=TRUE)})
+daily.orig.ci = apply(daily.orig, 1, quantile, c(0.025, 0.5, 0.975))
+
+ylim = range(c(range(daily.orig.ci),range(daily.nep,na.rm=TRUE)))
+doy  = sort(unique(date))
+plot(doy,daily.orig.ci[2,],ylim=ylim,col=1,pch=18,cex=0.5)
+ciEnvelope(doy, daily.orig.ci[1, ], daily.orig.ci[3, ], col = col.alpha("lightGrey", 0.5))
+points(doy,daily.nep,col=2,cex=0.5)
+legend("topright",legend=c("data","orig"),
+       pch = c(18,rep(1,2)),
+       col=  c(2,1))
+
+## daily predicted/observed
+plot(daily.orig.ci[2,],daily.nep,ylim=ylim,xlim=ylim)
+abline(0,1,col=2,lty=2)
+
+## mean diurnal curve
+tod = inputs$date - as.POSIXct(date)-5
+nep.diurnal = tapply(nep,tod,mean)
+time.of.day = as.numeric(names(nep.diurnal))
+orig.diurnal = tapply(ci[2,],tod,mean)
+
+ylim=range(range(orig.diurnal),range(nep.diurnal,na.rm=TRUE))
+plot(time.of.day,nep.diurnal,col=2,ylim=ylim)
+lines(time.of.day,orig.diurnal)
+legend("topright",legend=c("data","orig"),
+       pch = c(18,rep(1,2)),
+       col=  c(2,1))
+
+## binned functional responses
+nbin = 25
+Tair = inputs$temp
+xd = seq(min(Tair),max(Tair),length=nbin)
+xmid = xd[-length(xd)] + diff(xd)
+bin = cut(Tair,xd)
+Tbar.obs = tapply(nep,bin,mean,na.rm=TRUE)
+Tbar.mod = tapply(ci[2,],bin,mean,na.rm=TRUE)
+rng = range(rbind(Tbar.obs,Tbar.mod))
+plot(xmid,Tbar.obs,col="red",ylim=rng,type='l',xlab="Air Temperature (C)",ylab="NEP (umol/m2/s)",cex.lab=1.3)
+lines(xmid,Tbar.mod,col="black",lwd=4)
+legend("topleft",legend=c("Model","Data"),lwd=10,col=1:2,lty=1,cex=1.7)
+
+PAR = inputs$PAR
+xd = seq(min(PAR),max(PAR),length=nbin)
+xmid = xd[-length(xd)] + diff(xd)
+bin = cut(PAR,xd)
+Pbar.obs = tapply(nep,bin,mean,na.rm=TRUE)
+Pbar.mod = tapply(ci[2,],bin,mean,na.rm=TRUE)
+rng = range(rbind(Pbar.obs,Pbar.mod))
+plot(xmid,Pbar.obs,col="red",ylim=rng,type='l',xlab="PAR",ylab="NEP (umol/m2/s)",cex.lab=1.3)
+lines(xmid,Pbar.mod,col="black",lwd=4)
+legend("topleft",legend=c("Model","Data"),lwd=10,col=1:2,lty=1,cex=1.7)
+
 ```
-
-In addition to these simple pre-calibration checks, there are a wide range of additional checks one can do to visually assess model performance, including but not limited to: 
-
-* plots averaging over specific timescales (e.g., mean diurnal curve, mean seasonal curve, daily or monthly timeseries, "fingerprint" heatmaps of day-of-year by time-of-day) 
-* plots of functional responses (e.g., predicted and observed relationships with temp and PAR)
-
-TODO: add example code or link to validation lab
 
 Also, in terms of assessing overall model performance it is critical to look at as many pools and fluxes as possible, not just NEE. I recommend the following order of assessment, which can be helpful for isolating the specific processes that may be miscalibrated or misrepresented in the model
 
@@ -289,12 +340,6 @@ stats["pre",'cor']  = cor(E,O)
 stats["pre",'slope'] = coef(NEE.pre.fit)[2]
 stats["pre","R-squared"]=summary(NEE.pre.fit)$r.squared
 knitr::kable(stats)
-
-## predicted-observed
-plot(E,O,pch=".",xlab="model",ylab='observed',main='NEE (umol/m2/sec)')
-abline(0,1,col=2,lwd=2)
-abline(NEE.pre.fit,col=3,lwd=3,lty=2)
-legend("bottomright",legend=c('obs','1:1','reg'),col=1:3,lwd=3)
 ```
 
 If you liked model skill scores, you might also like...
@@ -304,12 +349,17 @@ If you liked model skill scores, you might also like...
 
 # Sensitivity
 
+This section performs a "one at a time" (OAT) sensitivity analysis. In this case, each parameter is set to its mean value and then, one at a time, one of those parameters are varied along a sequence of values. In this case the function uses the parameter `ns` to determine the number of steps and it varies each parameter along a sequence of quantiles from the minimum to the maximum within the ensemble samples. Because this code has to run separate ensembles for each of the 9 model parameters it may take a few minutes to run depending on the ensemble size. The output counter indicates which parameter is currently being run.
 ```{r}
 sa.summary = nee.sensitivity(ns=10)
 ## output is an array organized by parameter name, parameter samples, and variable
 ## variables are in the following order: 
 vname = c("param","mean","RMSE","Bias","cor")
+```
 
+Rather than looking at entire timeseries of model predictions as a function of each parameter value, here we're looking at just a few key summary statistics. The first is the mean NEP averaged over time. The others are error statistics comparing the model to the data (RMSE, bias, correlation). Let's start by visualizing the first of these (mean NEP), as the traditional goal of sensitivity analysis is to understand how the outputs change as a function of the inputs. In addition to make a grid of plots (one for each parameter), here we're also fitting a regression to these plots as these slopes (dNEP/dParameter) represent an overall numeric summary of sensitivity. Because the units of these slopes vary depending on the units of the output variable and the parameter, we also summarize these in a table of standardized sensivities (a.k.a., elasticities) where a value of 1 indicates that a unit change in the parameter produces a unit change in model output, and the sign indicated the direction of the relationship
+
+```{r,fig.asp=1}
 ## plot sensitivities and calc linear approx
 sens = sens_plot(var=2)
 
@@ -317,17 +367,20 @@ sens = sens_plot(var=2)
 knitr::kable(sens[order(abs(sens),decreasing = TRUE)]) 
 ```
 
+
 # Cost Functions & Likelihoods
 
 * What is a Likelihood?
 * How does it allow us to update model parameters?
 
 
-```{r}
+```{r,fig.asp=1}
 sens_plot(var=3,line=FALSE) ## RMSE (minimize)
 sens_plot(var=4,line=FALSE) ## bias (want as close as possible to 0)
 sens_plot(var=5,line=FALSE) ## correlation (maximize)
 ```
+
+TODO: Introduce the concept of LIKELIHOOD
 
 ```{r}
 theta_bar = t(apply(params, 2, mean))
@@ -342,12 +395,12 @@ likelihood <- function(param,Obs){
   Model = SSEM(X = Xbar,
                params = param[,1:9],
                inputs = inputs[,2:3]) 
-  lnL = -sum(dnorm(Obs,Model[qaqc],param[1,10],log=TRUE))
-  return(lnL)
+  lnL = sum(dnorm(Obs,Model[,,6],sd = param[1,10],log=TRUE),na.rm = TRUE)
+  return(-lnL)
 }
 
 #lnL at the current parameter mean values
-L0 = likelihood(param=theta_bar,Obs=O)
+L0 = likelihood(param=theta_bar,Obs=nep)
 
 ```
 
