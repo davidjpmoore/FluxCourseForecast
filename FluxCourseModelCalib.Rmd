@@ -8,7 +8,7 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 library(compiler)
 library(tidyverse)
-#library(mvtnorm)
+library(mvtnorm)
 source("R/functions.R")
 source("R/utils.R")
 
@@ -40,7 +40,7 @@ In terms of inputs, the model has three state variables (X) that are all express
 terms of carbon (Mg/ha): Leaf Biomass (X[,1]), Structural Biomass (wood, roots, etc; X[,2]),
 and soil organic matter (SOM; X[,3]). The modeled variables are thus the columns of X, while (as we'll see shortly) the different rows represent different replicate ensemble members. To be able to run the model we'll need to define the starting values of these variables (see **Initial Conditions**)
 
-The model also has only two drivers, photosynthetically active radiation (PAR) and air temperature. We pass these into the model as a data frame "inputs" with columns "PAR" and temp" (see **Drivers**). The model parameters are similarly passed in through the data frame "params" and are defined in the **Parameters** section below. Finally the model parameter "timestep" controls the model timestep and defaults to 30 min (1800 seconds) as this is the timestep of the meteorological inputs and eddy flux data that we'll use for calibration.
+The model also has only two drivers, photosynthetically active radiation (PAR) and air temperature. We pass these into the model as a data frame "inputs" with columns "PAR" and temp" (see **Drivers**). The model parameters are similarly passed in through the data frame "params" and are defined in the **Parameters** section below.
 
 Within the model we first 
 estimate LAI from Leaf Biomass and specific leaf area (SLA). Using LAI and light we estimate GPP 
@@ -187,19 +187,15 @@ plot_params(params)
 
 # Prior Predictive Checks: Monte Carlo Error Propagation
 
-As defined, our SSEM model only predicts one timestep into the future. To run this model forward for a full year (or longer) we're going to define a helper function `ensemble_forecast` that runs SSEM recursively, taking the outputs from one timestep and feeding them back in as the initial conditions for the next timestep.
-
-*Ensemble forecast function*
-```{r}
-ensemble_forecast
-```
 
 *Run model forward*
 ```{r}
-output.ensemble = ensemble_forecast(X = X.orig,
-                                    params = params,
-                                    inputs = inputs[,2:3], ## don't feed date col'n to model 
-                                    verbose= TRUE) 
+system.time({
+  output.ensemble = SSEM2(X=X.orig,
+                          params = params,
+                          inputs = inputs[,2:3], ## don't feed date col'n to model 
+                          verbose= TRUE) 
+})
 ```
 
 *Plot timeseries*
@@ -343,9 +339,9 @@ likelihood <- function(param,Obs){
   param = data.frame(t(param))
   colnames(param) = c(colnames(params),"sigma")
   print(param)
-  Model = ensemble_forecast(X = Xbar,
-                            params = param[,1:9],
-                            inputs = inputs[,2:3]) 
+  Model = SSEM(X = Xbar,
+               params = param[,1:9],
+               inputs = inputs[,2:3]) 
   lnL = -sum(dnorm(Obs,Model[qaqc],param[1,10],log=TRUE))
   return(lnL)
 }
@@ -355,7 +351,7 @@ L0 = likelihood(param=theta_bar,Obs=O)
 
 ```
 
-
+### Actual calibration takes a long time to run...
 ```{r}
 system.time({
   fit = optim(theta_bar,likelihood,method="L-BFGS-B",
@@ -395,10 +391,10 @@ plot_params(params_new)
 
 
 ```{r}
-calibrated.ensemble = ensemble_forecast(X = X.orig,
-                                    params = params_new,
-                                    inputs = inputs[,2:3], ## don't feed date col'n to model 
-                                    verbose= TRUE) 
+calibrated.ensemble = SSEM(X = X.orig,
+                           params = params_new,
+                           inputs = inputs[,2:3], ## don't feed date col'n to model 
+                           verbose= TRUE) 
 ```
 
 

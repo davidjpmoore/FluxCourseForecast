@@ -4,67 +4,51 @@
 ##` @param X        [leaf carbon, wood carbon, soil organic carbon] (units=Mg/ha)
 ##` @param params   model parameters
 ##` @param inputs   model drivers (air temperature, PAR)
-##` @param timestep seconds, defaults to 30 min
-SSEM.orig <- function(X, params, inputs, timestep = 1800){ 
-  
-  ne = nrow(X)  ## ne = number of ensemble members
+##` @param verbose  provide a counter on elapsed time
+SSEM.orig <- function(X, params, inputs, verbose=FALSE){ 
+  timestep <- as.numeric(median(diff(as.numeric(inputs$date)), na.rm = TRUE)) ## seconds
+  nt = nrow(inputs)                         ## number of time steps
+  ne = nrow(X)                              ## number of ensemble members
+  output = array(0.0, c(nt, ne, 12))        ## output storage [time step,ensembles,variables]
   
   ##Unit Converstion: umol/m2/sec to Mg/ha/timestep
   k = 1e-6 * 12 * 1e-6 * 10000 * timestep #mol/umol*gC/mol*Mg/g*m2/ha*sec/timestep
   
-  ## photosynthesis
-  LAI = X[, 1] * params$SLA * 0.1  #0.1 is conversion from Mg/ha to kg/m2
-  GPP = pmax(0, params$alpha * (1 - exp(-0.5 * LAI)) * inputs$PAR)
-  GPP[inputs$PAR < 1e-20] = 0 ## night
-  
-  ## respiration & allocation
-  alloc = GPP *   params[,c("falloc.1","falloc.2","falloc.3")] ## Ra, NPPwood, NPPleaf
-  Rh = pmax(params$Rbasal * X[, 3] * params$Q10 ^ (inputs$temp / 10), 0) ## pmax ensures SOM never goes negative
-  
-  ## turnover
-  litterfall = X[, 1] * params$litterfall
-  mortality = X[, 2] * params$mortality
-  
-  ## update states
-  X1 = pmax(X[, 1] + alloc[, 3] * k - litterfall, 0)
-  X2 = pmax(X[, 2] + alloc[, 2] * k - mortality, 0)
-  X3 = pmax( X[, 3] + litterfall + mortality - Rh * k, 0)
-  
-  return(cbind(X1 = X1, X2 = X2, X3 = X3,
-               LAI = X1 * params$SLA * 0.1, 
-               GPP = GPP,
-               NEP = GPP - alloc[, 1] - Rh,
-               Ra = alloc[, 1], NPPw = alloc[, 2], NPPl = alloc[, 3],
-               Rh = Rh, litterfall = litterfall, mortality = mortality))
-  
-}
-SSEM <- compiler::cmpfun(SSEM.orig)  ## byte compile the function to make it faster
-
-
-##` @param X       Initial Conditions [leaf carbon, wood carbon, soil organic carbon] (units=Mg/ha)
-##` @param params   model parameters
-##` @param inputs   model drivers (air temperature, PAR)
-##` @param verbose  provide a counter on elapsed time
-ensemble_forecast <- function(X,params,inputs,verbose=FALSE){
-  nt = nrow(inputs)
-  output = array(0.0, c(nt, ne, 12))        ## output storage [time step,ensembles,variables]
-  if(length(dim(inputs)) < 3){              ## add ens dim to non-ensemble met
-    i2 = array(NA,dim=c(nrow(inputs),ne,2)) ## [time,ensemble,variable]
-    for(i in 1:ne) i2[,i,] = as.matrix(inputs) ## replicate inputs for every ensemble member
-    dimnames(i2)[[3]] = colnames(inputs)    ## copy over column names
-    inputs = i2
-  }
-  
-  ## forward ensemble simulation
   for(t in 1:nt){
-    output[t, , ] <- SSEM(X, params, as.data.frame(inputs[t, , ]))  ## run model, save output
-    X <- output[t, , 1:3]                          ## set most recent prediction to be the next IC
+    
+    ## photosynthesis
+    LAI = X[, 1] * params$SLA * 0.1  #0.1 is conversion from Mg/ha to kg/m2
+    GPP = pmax(0, params$alpha * (1 - exp(-0.5 * LAI)) * inputs$PAR[t])
+    GPP[inputs$PAR[t] < 1e-20] = 0 ## night
+    
+    ## respiration & allocation
+    alloc = GPP *   params[,c("falloc.1","falloc.2","falloc.3")] ## Ra, NPPwood, NPPleaf
+    Rh = pmax(params$Rbasal * X[, 3] * params$Q10 ^ (inputs$temp[t] / 10), 0) ## pmax ensures SOM never goes negative
+    
+    ## turnover
+    litterfall = X[, 1] * params$litterfall
+    mortality = X[, 2] * params$mortality
+    
+    ## update states
+    X1 = pmax(X[, 1] + alloc[, 3] * k - litterfall, 0)
+    X2 = pmax(X[, 2] + alloc[, 2] * k - mortality, 0)
+    X3 = pmax( X[, 3] + litterfall + mortality - Rh * k, 0)
+    
+    output[t,,] = cbind(X1 = X1, X2 = X2, X3 = X3,
+                        LAI = X1 * params$SLA * 0.1, 
+                        GPP = GPP,
+                        NEP = GPP - alloc[, 1] - Rh,
+                        Ra = alloc[, 1], NPPw = alloc[, 2], NPPl = alloc[, 3],
+                        Rh = Rh, litterfall = litterfall, mortality = mortality)
+    X = output[t, ,1:3] ## current state variables become the next initial conditions
     if((t %% 1440) == 0 && verbose) print(t)             ## counter: elapsed time (30*48 = approx 1 month)
   }
   output[is.nan(output)] = 0
   output[is.infinite(output)] = 0
-  return(output) 
+  return(output)
 }
+SSEM <- compiler::cmpfun(SSEM.orig)  ## byte compile the function to make it faster
+
 
 ######  SENSITIVITY ANALYSIS ####
 
@@ -84,9 +68,9 @@ nee.sensitivity = function(ns){
     theta_sa = as.data.frame(matrix(theta_ci[2,],nrow=ns,ncol=ncol(theta_ci),byrow = TRUE)) ## matrix of defaults
     colnames(theta_sa) = colnames(params)
     theta_sa[,i] = quantile(params[,i],seq(0,1,length=ns))                   ## Vary one parameter
-    sa.ensemble = ensemble_forecast(X = Xbar,
-                                    params = theta_sa,
-                                    inputs = inputs[,2:3]) 
+    sa.ensemble = SSEM(X = Xbar,
+                       params = theta_sa,
+                       inputs = inputs[,2:3]) 
     sa.nee = sa.ensemble[,,6]
     sa.stats[,"param"] = theta_sa[,i]
     sa.stats[,"mean"] = apply(sa.nee,2,mean)
