@@ -15,7 +15,7 @@ source("R/utils.R")
 ## configuration
 
 #### SET THE ENSEMBLE SIZE
-ne = 50 ## should be 200 - 5000, depending on what your computer can handle
+ne = 100 ## should be 200 - 5000, depending on what your computer can handle
 
 timestep = 1800 #seconds
 
@@ -135,8 +135,8 @@ params = list()
 
 ## univariate priors: expert opinion
 params$alpha = rlnorm(ne, log(0.02), 0.05)     ## light use efficiency
-params$Q10 = rnorm(ne, 2.1, 0.1)               ## soil respiration Q10
-params$Rbasal = rlnorm(ne, log(0.2), 1) / (params$Q10^2.5) ## Soil basal respiration (umol/m2/sec per Mg/ha of SOM)
+params$Q10 = rnorm(ne, 2.1, 0.5)               ## soil respiration Q10
+params$Rbasal = rlnorm(ne, log(0.2), 1.5) / (params$Q10^2.5) ## Soil basal respiration (umol/m2/sec per Mg/ha of SOM)
 
 ## multivariate prior on allocation parameters
 ## assume that NPP is ~50% of GPP on average (Litton et al 2007)
@@ -144,7 +144,7 @@ Ra = 0.5
 ## prior mean on allocation, assume leaf NPP is 31.5% of total (Quaife et al 2008)
 alloc = matrix(c(Ra, (1 - 0.315) * (1 - Ra), 0.315 * (1 - Ra)), 1) 
 ## draw effective sample size to add stochasticity to prior
-Neff = matrix(rpois(ne, 100), ne)
+Neff = matrix(rnbinom(ne, 1000,mu=50), ne)
 rdirichlet <- cmpfun(rdirichlet.orig)         ## byte compile to speed up
 ## prior on fractional allocation to [Ra, wood, leaf] (each draw must sum to 1)
 params$falloc = rdirichlet(ne,Neff%*%alloc) 
@@ -178,6 +178,7 @@ params$mortality = rbeta(ne,mortality.param$a,mortality.param$b)
 
 ## flatten to a data frame
 params = as.data.frame(params)
+params[params < 0] = 0
 ```
 
 ### plot parameter values
@@ -368,10 +369,9 @@ knitr::kable(sens[order(abs(sens),decreasing = TRUE)])
 ```
 
 
-# Cost Functions & Likelihoods
+# Model Calibration: Cost Functions & Likelihoods
 
-* What is a Likelihood?
-* How does it allow us to update model parameters?
+Before we dive into formally defining model calibration, let's take our sensitivity function and look at how different error metrics vary as a function of the different model parameters
 
 
 ```{r,fig.asp=1}
@@ -380,7 +380,30 @@ sens_plot(var=4,line=FALSE) ## bias (want as close as possible to 0)
 sens_plot(var=5,line=FALSE) ## correlation (maximize)
 ```
 
+In the example above we saw how model error changed as a function of the parameter value. In many cases there was a specific direction that each parameter could be nudge to reduce the model error, while in others there may have been some sort of concave function that implied a specific parameter value that would minimize error.
+
+This example of how error varies as a function of model parameters leads us quite naturally to the key idea of model calibation -- finding the model parameter set that minimizes some metric of model error. More formally, calibration aims to minimize a _cost function_. A simple example of a cost function that would be familar from classic statistics (e.g., regression) would be the minimization of the sum of squared errors, which will be equivalent to the minimization of the RMSE that we saw above.
+
+Here we're going to rely on a very common type of cost function called a _Likelihood_, which is a cost function rooted in probability theory. More specifically, a likelihood function, L=P(data|model), is the probability of observing a specific set of observations conditional on a specific model parameter vector. For example, a traditional linear regression assumes a Normal likelihood with residual errors that are independent and identically distributed
+
+$$P(y|X, \beta, \sigma^2) = N\left(y | X\beta,\sigma^2  \right) = \prod_{i=1}^{n} \frac{1}{\sqrt{2\pi\sigma^2}} \exp\left(-\frac{(y_i - \beta^T x_i)^2}{2\sigma^2}\right)$$
+
+In this activity, we're going to similarly assume a Normal likelihood, but in this case the model predictions are provided by SSEM rather than a linear model
+
+$$P(y|\theta, \sigma^2) = N\left(y | SSEM(\theta,X,inputs) ,\sigma^2  \right) $$
+where theta is the vector of model parameters (i.e., params), X remain the initial conditions, and inputs remain the meteorological drivers. 
+
+In the code chunk below we implement this Likelihood function in R. This function takes in a vector of parameters and vector of observed data, runs the model, and then uses the `dnorm` function to calculate the Normal likelihood. Note that in dnorm we use the argument `log=TRUE` to return the log of the likelihood, rather than the raw likelihood. This is traditionally done for reasons of nu
+
+
+
+
+* What is a Likelihood?
+* How does it allow us to update model parameters?
+
 TODO: Introduce the concept of LIKELIHOOD
+
+
 
 ```{r}
 theta_bar = t(apply(params, 2, mean))
@@ -406,14 +429,21 @@ L0 = likelihood(param=theta_bar,Obs=nep)
 
 ### Actual calibration takes a long time to run...
 ```{r}
-system.time({
-  fit = optim(theta_bar,likelihood,method="L-BFGS-B",
-              lower=theta_range[1,],upper=theta_range[2,],
-              hessian=TRUE,Obs=O)
-})
+fit_file = "fit.RData"
+if(file.exists(fit_file)){ ## load existing calibration if it exists
+  load(fit_file)
+} else {
+  system.time({
+    fit = optim(theta_bar,likelihood,method="L-BFGS-B",
+                lower=theta_range[1,],upper=theta_range[2,],
+                hessian=TRUE,Obs=nep)
+  })
+  
+  save(fit,file=fit_file)
+}
 ```
 #    user   system  elapsed 
-# 3013.518   17.341 4280.111 
+# 4300.541   23.545 4705.535  
 
 If you liked model calibration, you may also like...
 
@@ -421,12 +451,7 @@ If you liked model calibration, you may also like...
   * JAGS, NIMBLE
   * R's BayesianTools
 * Hamiltonian Monte Carlo & STAN
-* State Space Models
-* Kalman Filter
-* Ensemble Kalman Filter
-* Particle Filter
 * Using uncertainty analysis (Sobol, Monte Carlo, etc) to reduce the number of parameters considered
-
 
 # Post-calibration prediction
 
@@ -434,35 +459,78 @@ If you liked model calibration, you may also like...
 ## updated parameter sample
 mu = fit$par
 H = abs(diag((fit$hessian + t(fit$hessian))/2))
+## hack: missing values
+H[H==0] = mean(H[H>0])
 #sigma = solve(H, tol = 1e-25)
 #sigma = MASS::ginv(-H)
 sigma = diag(1/H)
 params_new = as.data.frame(mvtnorm::rmvnorm(ne,mu,sigma))
 colnames(params_new) = c(colnames(params),"sigma")
+params_new[params_new<0] = 0
 plot_params(params_new)
 ```
-
 
 ```{r}
 calibrated.ensemble = SSEM(X = X.orig,
                            params = params_new,
-                           inputs = inputs[,2:3], ## don't feed date col'n to model 
+                           inputs = inputs, 
                            verbose= TRUE) 
 ```
 
 
+# Ensemble Kalman Inversion
+
+One of the challenges with numerical optimization (and more sophisticated Bayesian approaches) is that they become very computationally expensive as the model gets more complex (and slower) or the volume of data gets larger. Two key reasons for this are the number of parameter proposals required (which is often thousands) and the fact that the parameter proposals are sequential.
+
+While a bit less intuitive, there are a number of approaches to calibration that are ensemble based, which allow you to parallize model evaluation, and which often require a smaller total number of model runs. Here we're going to illustrate one of the simplest versions of this, which is known as Ensemble Kalman Inversion
+
+```{r}
+Xbar    = matrix(apply(X.orig,2,mean),nrow=ne,ncol=3,byrow = TRUE)
+output1 = SSEM(Xbar,params,inputs)
+RMSE    = sqrt(mean((output1[,,6]-nep)^2))
+
+params2 = EKI(output1[,,6],Obs = nep,params,sigma=RMSE)
+params2 = impose.contraints(params2,params)
+output2 = SSEM(Xbar,params2,inputs)
+RMSE[2] = sqrt(mean((output2[,,6]-nep)^2))
+
+
+params3 = EKI(output2[,,6],Obs = nep,params2,sigma=RMSE[2])
+params3 = impose.contraints(params3,params)
+output3 = SSEM(Xbar,params3,inputs)
+RMSE[3] = sqrt(mean((output3[,,6]-nep)^2))
+
+params_new = EKI(output3[,,6],Obs = nep,params2,sigma=RMSE[3])
+params_new = impose.contraints(params_new,params)
+output3    = SSEM(Xbar,params_new,inputs)
+RMSE[4]   = sqrt(mean((calibrated.ensemble[,,6]-nep)^2))
+
+RMSE
+
+## select the parameter set that minimizes RMSE
+params_new = params2
+calibrated.ensemble = SSEM(X.orig,params_new,inputs)
+```
+
+```{r,fig.asp=1}
+plot_params(params_new,hist.params = params)
+```
 
 
 
+* State Space Models
+* Kalman Filter
+* Ensemble Kalman Filter
+* Particle Filter
 
 
 
-
+# Post-calibration prediction
 
 
 Timeseries for all variables
 ```{r}
-plot_forecast(calibrated.ensemble,sample=5)
+plot_forecast(calibrated.ensemble,sample=5,timestep = 48)
 
 ## model
 ci.new = apply(calibrated.ensemble[, ,6], 1, quantile, c(0.025, 0.5, 0.975)) ## forecast confidence interval
@@ -477,7 +545,7 @@ legend("topright",legend=c("model",paste("QC",0:3)),
        col=  c(1,1:4))
 
 ## predicted/observed plot
-plot(ci[2,],nep,col=nep.qc+1,cex=0.2)
+plot(ci.new[2,],nep,col=nep.qc+1,cex=0.2)
 abline(0,1,lty=2)
 
 ## smoothed daily time series
@@ -525,7 +593,25 @@ legend("topright",legend=c("data","orig","calib"),
 
 ```
 
+## Skill scores
 
+```{r}
+## apply QAQC
+qaqc = (nep.qc == 0)
+E = ci.new[2,qaqc]           ## model = expected
+O = nep[qaqc] ## observed
+
+## Model vs obs regressions
+NEE.post.fit = lm(O ~ E)
+
+## performance stats
+stats["post","RMSE"] = sqrt(mean((E-O)^2))
+stats["post",'Bias'] = mean(E-O)
+stats["post",'cor']  = cor(E,O)
+stats["post",'slope'] = coef(NEE.post.fit)[2]
+stats["post","R-squared"]=summary(NEE.post.fit)$r.squared
+knitr::kable(stats)
+```
 
 # Next steps
 

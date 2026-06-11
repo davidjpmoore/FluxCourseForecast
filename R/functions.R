@@ -119,14 +119,15 @@ plot_params <- function(params, hist.params = NULL){
     } else {
       orig = density(hist.params[,i])      ## parameter density at start of PF
       ylim=range(c(range(new$y),range(orig$y)))
+      xlim = range(c(range(new$x),range(orig$x)))
       plot(orig,main=names(params)[i],xlab=" ",
-           ylim=ylim)
+           ylim=ylim,xlim=xlim)
       lines(new,col=2,lwd=2)
-      text(max(orig$x),ylim[2],
+      text(max(orig$x),ylim[2]*0.9,
            paste("Prior",format(mean(hist.params[,i]),digits=3), ## write the mean and SD onto the figure
                  format(sd(hist.params[,i]),digits=3)),
            pos=2)
-      text(max(orig$x),ylim[2]*0.9,
+      text(max(orig$x),ylim[2]*0.8,
            paste("Final timestep:",format(mean(params[[i]]),digits=3), ## write the mean and SD onto the figure
                  format(sd(params[[i]]),digits=3)),
            pos=2,col=2)
@@ -188,6 +189,61 @@ plot_forecast <- function(out,sample=FALSE,timestep=1){
   }
 }
 
+####   ENSEMBLE KALMAN INVERSION ####
+
+EKI = function(Model,Obs,params,sigma){
+ 
+  ne = ncol(Model)
+  obs_variance = sigma^2
+
+  # Compute ensemble means
+  mean_theta <- colMeans(params)
+  mean_G <- rowMeans(Model)
+
+  # Compute Mean-Centered Matrices (with explicit matrix enforcement)
+  theta_dash <- t(as.matrix(scale(params, center = TRUE, scale = FALSE)))  # Dim: [N_par, N_ens]
+  G_dash <- as.matrix(scale(Model, center = TRUE, scale = FALSE))     # Dim: [N_obs, N_ens]
+  
+  # Calculate residual error (innovation) matrix for all ensemble members
+  # Dim: [N_obs, N_ens]
+  Innovation <- Obs - Model 
+  
+  # 1. Compute tiny core matrix: (G'^T * Gamma^-1 * G' + (N_ens - 1)*I)
+  # Dim: [N_ens, N_ens]
+  subspace_matrix <- (t(G_dash) %*% G_dash) / obs_variance + diag(ne - 1, ne)
+  
+  # 2. Compute intermediate mapping: Gamma^-1 * Innovation
+  # Dim: [N_ens, N_ens] after multiplying with t(G_dash)
+  mapped_innovation <- t(G_dash) %*% Innovation / obs_variance
+  
+  # 3. Solve the small system [N_ens, N_ens] using a fast Cholesky solver
+  # Dim: [N_ens, N_ens]
+  subspace_update <- solve(subspace_matrix, mapped_innovation)
+  
+  # 4. Map back to parameter space and update entire ensemble at once
+  # Dim: [N_par, N_ens]
+  param_update <- theta_dash %*% subspace_update
+  
+  # Update parameters (transpose back to match X dimensions)
+  return(params + t(param_update))
+   
+}
+
+impose.contraints <- function(new_params,params){
+  for(i in 1:ncol(params)){
+    sel = which(new_params[,i] < min(params[,i]))
+    if(length(sel)>0){
+      new_params[sel,i] = rnorm(length(sel),min(params[,i]),0.01*min(params[,i]))
+    }
+    sel = which(new_params[,i] > max(params[,i]))                                         
+    if(length(sel)>0){
+      new_params[sel,i] = rnorm(length(sel),max(params[,i]),0.01*max(params[,i]))
+    }
+  }
+  fsum = rowSums(new_params[,4:6])  ## renormalize falloc to sum to 1
+  new_params[,4:6] = new_params[,4:6]/fsum
+  new_params
+}
 
 ######   MISC HELPER FUNCTIONS ######
 
