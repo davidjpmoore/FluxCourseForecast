@@ -8,8 +8,9 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 library(compiler)
 library(tidyverse)
-library(mvtnorm)    ## optional
-library(GA)         ## optional
+#library(mvtnorm)    ## optional
+#library(GA)         ## optional
+#library(numDeriv)   ## optional
 source("R/functions.R")
 source("R/utils.R")
 
@@ -440,13 +441,15 @@ likelihood <- function(param,Obs){
   
   ## calculate likelihood
   lnL = sum(dnorm(Obs,Model[,,6],sd = param[1,10],log=TRUE),na.rm = TRUE)
-  return(-lnL)
+  return(lnL)
 }
 
 ## some "default" parameter values for testing
 theta_bar = t(apply(params, 2, mean))
 theta_bar[10] = stats["pre","RMSE"]
-theta_range = apply(params, 2, range) 
+theta_range = apply(params, 2, range)
+sigma = c(0,10)
+theta_range = cbind(theta_range,sigma)
 Xbar        = matrix(apply(X.orig,2,mean),nrow=1)
 
 # lnL at the current parameter mean values
@@ -455,6 +458,7 @@ Xbar        = matrix(apply(X.orig,2,mean),nrow=1)
 L0 = likelihood(param=theta_bar,Obs=nep)
 
 ```
+
 ## Numerical Optimization
 
 If the Likelihood is the probability of observing the data given a specific set of model parameters, this implies that _a parameter value is more likely than another if it is the one for which the data are more probable_. This precept, known as the *Likelihood Principle* leads to the further idea that if one parameter value can be more likely than another, can we find the parameter values that are MOST probable. This is know as a **Maximum Likelihood Estimate (MLE)**.
@@ -463,46 +467,48 @@ For simple likelihood functions the MLE can be found using calculus: take the de
 
 ### Actual calibration takes a long time to run...
 ```{r}
-fit_file = "fit.RData"
+fit_file = "fitGA.RData"
 if(file.exists(fit_file)){ ## load existing calibration if it exists
   load(fit_file)
-} else {
-  system.time({
-    fit = optim(theta_bar,likelihood,method="L-BFGS-B",
-                lower=theta_range[1,],upper=theta_range[2,],
-                hessian=TRUE,Obs=nep)
-  })
+} else { 
+  fitted_model <- GA::ga(
+    type = "real-valued", 
+    fitness = likelihood,
+    lower = theta_range[1,], 
+    upper = theta_range[2,],
+    
+    # --- Arguments passed on to likelihood ---
+    Obs = nep,
+    
+    # --- SPEED TUNING PARAMETERS FOR 9 DIMENSIONS ---
+    parallel = TRUE,
+    popSize = 30,       # Small population for lower memory/compute overhead
+    maxiter = 50,       # Hard ceiling to prevent long run times
+    run = 10,           # Stop early if no improvement seen for 10 generations
+    pmutation = 0.2     # Higher mutation keeps it escaping local minima despite low popSize
+  )
   
-  save(fit,file=fit_file)
+  save(fitted_model,file=fit_file)  ## save output for reuse
 }
-```
-#    user   system  elapsed 
-# 4300.541   23.545 4705.535  
-
-*** TODO ***
- - to run, switch sign on lnL
-
-```{r}
-fitted_model <- GA::ga(
-  type = "real-valued", 
-  fitness = likelihood,
-  lower = theta_range[1,], 
-  upper = theta_range[2,],
-  
-  # --- SPEED TUNING PARAMETERS FOR 9 DIMENSIONS ---
-  parallel = TRUE,
-  popSize = 30,       # Small population for lower memory/compute overhead
-  maxiter = 50,       # Hard ceiling to prevent long run times
-  run = 10,           # Stop early if no improvement seen for 10 generations
-  pmutation = 0.2     # Higher mutation keeps it escaping local minima despite low popSize
-)
 
 # Summary of the result
 summary(fitted_model)
-# Extract the best 9D parameter vector
-best_parameters <- fitted_model@solution 
+# Extract the best parameter vector
+params_MLE <- as.data.frame(fitted_model@solution)
 ```
 
+Unfortunately, MLE only returns a single best parameter estimate and additional assumptions must be made, and calculations done, to estimate parameter uncertainty. One way of doing this is using a _bootstrap_ method, such as repeatedly resampling the data and refitting the model parameters, repeatng this once for each ensemble member. Another way is using the second derivatives to estimate a covariance matrix (which is only accurate if your log likelihood is roughly quadratic in shape and the minimum is not at one of the boundaries):
+
+```
+# Calculate a numerical Richardson extrapolation of the Hessian matrix (Also slow)
+H <- numDeriv::hessian(func = function(x) -likelihood(x,Obs=nep),
+                                    x = as.vector(best_parameters))
+sigma = solve(H)
+params_new = as.data.frame(mvtnorm::rmvnorm(ne,mu,sigma))
+colnames(params_new) = c(colnames(params),"sigma")
+params_new[params_new<0] = 0
+plot_params(params_new)                                    
+```
 
 If you liked model calibration, you may also like...
 
@@ -511,42 +517,6 @@ If you liked model calibration, you may also like...
   * R's BayesianTools
 * Hamiltonian Monte Carlo & STAN
 * Using uncertainty analysis (Sobol, Monte Carlo, etc) to reduce the number of parameters considered
-
-# Post-calibration prediction
-
-*** TODO: Update for new optim
-
-```{r}
-library(numDeriv)
-
-# Calculate a numerical Richardson extrapolation of the Hessian matrix
-hessian_matrix <- hessian(func = function(x) -black_box_objective(x), x = ga_solution)
-```
-
-
-```{r,fig.asp=1}
-## updated parameter sample
-mu = fit$par
-H = abs(diag((fit$hessian + t(fit$hessian))/2))
-## hack: missing values
-H[H==0] = mean(H[H>0])
-#sigma = solve(H, tol = 1e-25)
-#sigma = MASS::ginv(-H)
-sigma = diag(1/H)
-params_new = as.data.frame(mvtnorm::rmvnorm(ne,mu,sigma))
-colnames(params_new) = c(colnames(params),"sigma")
-params_new[params_new<0] = 0
-plot_params(params_new)
-```
-
-Armed with our updated parameter vector we can now re-run our model...
-
-```{r}
-calibrated.ensemble = SSEM(X = X.orig,
-                           params = params_new,
-                           inputs = inputs, 
-                           verbose= TRUE) 
-```
 
 
 # Ensemble Kalman Inversion
