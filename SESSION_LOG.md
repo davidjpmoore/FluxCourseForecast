@@ -845,3 +845,22 @@ Five targeted edits per Mike Dietze review:
 3. Removed unused `SOM <- c(SOM, SOM)` line
 4. Replaced fake LMA vector (`1e3 / c(100, 150, 200)`) with direct SLA prior mean/SD (`SLA_mean=10, SLA_sd=3, SLA_badm=rnorm(10,...)`)
 5. Added note explaining that US-NR1 ICs are BADM-derived and generic defaults are intentionally broad
+
+---
+
+## [2026-06-15] Student zip rebuilt and uploaded to Google Drive
+
+### Task: Update Tuesday_AM_SSEM_part1 student zip
+
+**Files copied into `exercises/student_data/Tuesday_AM_SSEM_part1/`**
+- `download_site.R` (new, 15 KB) — from `data/download_site.R` on fluxcourse-multisite-prep
+- `prepare_site.R` (new, 30 KB) — from `data/prepare_site.R` on fluxcourse-multisite-prep; includes reviewer-feedback fixes (CV 50%, SLA prior, etc.)
+- `dashboard.html` (updated, 9.1 MB) — replaced Jun 9 version with Jun 15 version from repo root
+
+**Zip rebuilt:** `exercises/student_data/Tuesday_AM_SSEM_part1.zip`
+- 38 files, 2.2 GB uncompressed → 704 MB compressed (68% reduction)
+- New files confirmed inside zip with Jun 15 timestamps
+
+**Google Drive upload:** Replaced 703 MB Jun 9 version with 704 MB Jun 15 version
+- Destination: `FLUXCOURSE 2026 Shared Resources/Week 2 Instructional Materials/Tuesday_AM_SSEM_part1.zip`
+- Upload confirmed: 704 MB, timestamped 2026-06-15 09:02
