@@ -472,6 +472,222 @@ the full exercise package with student exercise Rmd files)
 
 ---
 
+## [2026-06-15] Audit: mdietze/FluxCourseForecast 2026 branch (/tmp/mdietze_2026)
+
+Read every file in the cloned 2026 branch and produced a full structural report.
+No files were modified except this log.
+
+### Files in /tmp/mdietze_2026 (non-.git)
+```
+.github/workflows/do_prediction.yml
+.gitignore
+data/US-NR1_BADM.csv
+data/US-NR1_Flux2015.csv
+fitGA.RData
+FluxCourseModelCalib.Rmd
+forecast.R
+install.R
+LICENSE
+R/functions.R
+R/utils.R
+README.md
+```
+
+### Data objects created / expected by FluxCourseModelCalib.Rmd
+
+**Configuration (hardcoded in setup chunk):**
+- `ne = 100` — ensemble size
+- `timestep = 1800` — seconds (hardcoded; also used in param prior conversions)
+- `start_date = as.Date("2015-07-01")` — hardcoded
+- `outdir = "./"` — output directory
+
+**Data loading:**
+- `flux` — loaded from hardcoded path `data/US-NR1_Flux2015.csv`
+- `date` — `strptime(flux$TIMESTAMP_START, format="%Y%m%d%H%M")`
+
+**Columns accessed from `flux`:**
+| Column | Use |
+|---|---|
+| `TIMESTAMP_START` | parsed via strptime("%Y%m%d%H%M") → `date` |
+| `TA_ERA` | gap-filled air temperature (°C) → `inputs$temp` |
+| `SW_IN_ERA` | shortwave radiation (W m⁻²) → `inputs$PAR` via conversion |
+| `NEE_VUT_REF` | NEE (sign-flipped) → `nep` |
+| `NEE_VUT_REF_QC` | QC flag → `nep.qc` |
+| `NEE_VUT_REF_JOINTUNC` | joint uncertainty → `nep.unc` |
+
+**PAR conversion formula:**
+```r
+PAR = flux$SW_IN_ERA / 0.486   ## Campbell and Norman p151
+```
+Converts shortwave radiation (W m⁻²) to PAR. Same formula appears in `forecast.R` for NOAA stage2/3 met data.
+
+**`inputs` data.frame columns:** `date`, `temp`, `PAR`
+
+**Key derived variables:**
+- `X` / `X.orig` — `[ne × 3]` initial state matrix: leaf, wood, SOM (Mg/ha)
+- `params` — data.frame with 9 columns: `alpha`, `Q10`, `Rbasal`, `falloc.1`, `falloc.2`, `falloc.3`, `SLA`, `litterfall`, `mortality`
+- `output.ensemble` — 3D array `[nt × ne × 12]` from full SSEM run
+- `nep` = `-flux$NEE_VUT_REF`; `nep.qc` = `flux$NEE_VUT_REF_QC`
+- `qaqc` = `(nep.qc == 0)` — QC mask
+- `ci` = `apply(output.ensemble[,,6], 1, quantile, c(0.025, 0.5, 0.975))` — variable 6 = NEP
+- `E` = `ci[2, qaqc]` (model); `O` = `nep[qaqc]` (obs)
+- `stats` — `[pre/post × RMSE/Bias/cor/slope/R-squared]` data.frame
+- `sa.summary` — sensitivity array `[nparam × ns × 5]`; `vname = c("param","mean","RMSE","Bias","cor")`
+- `theta_bar` — mean parameter vector (9 params + sigma); `theta_range` — bounds matrix
+- `Xbar` — `matrix(apply(X.orig,2,mean), nrow=ne, ncol=3, byrow=TRUE)` (mean IC, ne rows)
+- `lambda = 1.2` — EKI variance inflation factor
+- `output` / `param` / `RMSE` — lists storing per-iteration EKI results
+- `params_new` — best EKI parameter set; `calibrated.ensemble` — final SSEM output
+
+**Hardcoded file paths:**
+- `data/US-NR1_Flux2015.csv` (Rmd line 118, driver data)
+- `"fitGA.RData"` (Rmd line 471, GA calibration save/load)
+
+**Timestep usage:**
+- `timestep = 1800` at top of Rmd; used in prior calculations as `* timestep/86400/365`
+- Inside `SSEM.orig` (Mike's version), timestep is **auto-detected** from `inputs$date`:
+  `timestep <- as.numeric(median(diff(as.numeric(inputs$date)), na.rm=TRUE))`
+  i.e., it is NOT passed as an argument — it infers it from the POSIXct datetime column.
+
+---
+
+### New functions in /tmp/mdietze_2026/R/functions.R not in local functions.R
+
+Five functions are present in Mike's version that do not exist in our local `R/functions.R`:
+
+#### 1. `EKI()` — Ensemble Kalman Inversion (lines 194–230)
+```r
+EKI = function(Model, Obs, params, sigma){
+  ne = ncol(Model)
+  obs_variance = sigma^2
+  mean_theta <- colMeans(params)
+  mean_G <- rowMeans(Model)
+  theta_dash <- t(as.matrix(scale(params, center=TRUE, scale=FALSE)))  # [N_par, N_ens]
+  G_dash <- as.matrix(scale(Model, center=TRUE, scale=FALSE))          # [N_obs, N_ens]
+  Innovation <- Obs - Model                                             # [N_obs, N_ens]
+  subspace_matrix <- (t(G_dash) %*% G_dash) / obs_variance + diag(ne-1, ne)  # [N_ens, N_ens]
+  mapped_innovation <- t(G_dash) %*% Innovation / obs_variance
+  subspace_update <- solve(subspace_matrix, mapped_innovation)          # Cholesky solver
+  param_update <- theta_dash %*% subspace_update                       # [N_par, N_ens]
+  return(params + t(param_update))
+}
+```
+Takes: `Model` `[N_obs × N_ens]`, `Obs` vector, `params` data.frame `[N_ens × N_par]`, `sigma` scalar.
+Returns: updated params data.frame. Implements a subspace EKI using Cholesky solve. Called in the Rmd 4-iteration loop; `sigma` is set to `RMSE[i] * lambda` (lambda = 1.2).
+
+#### 2. `impose.contraints()` — enforce parameter bounds and renormalize falloc (lines 232–246)
+**Note: the function name has a typo — "contraints" not "constraints". The Rmd calls it as spelled.**
+```r
+impose.contraints <- function(new_params, params){
+  for(i in 1:ncol(params)){
+    sel = which(new_params[,i] < min(params[,i]))
+    if(length(sel)>0)
+      new_params[sel,i] = rnorm(length(sel), min(params[,i]), 0.01*min(params[,i]))
+    sel = which(new_params[,i] > max(params[,i]))
+    if(length(sel)>0)
+      new_params[sel,i] = rnorm(length(sel), max(params[,i]), 0.01*max(params[,i]))
+  }
+  fsum = rowSums(new_params[,4:6])  ## columns 4-6 = falloc.1, falloc.2, falloc.3
+  new_params[,4:6] = new_params[,4:6] / fsum  ## renormalize to sum to 1
+  new_params
+}
+```
+Clips any out-of-prior-range parameter values back to the prior boundary (with small Gaussian noise), then renormalizes the falloc columns (4:6) so they sum to 1.
+
+#### 3. `nee.sensitivity()` — one-at-a-time sensitivity analysis (lines 56–83)
+```r
+nee.sensitivity = function(ns){
+  ne = ns
+  sa.summary = array(NA, c(ncol(params), ns, 5))
+  theta_ci = apply(params, 2, quantile, c(0, 0.5, 1))
+  Xbar = matrix(apply(X.orig,2,mean), nrow=ns, ncol=3, byrow=TRUE)
+  for(i in seq_len(ncol(params))){
+    sa.stats = as.data.frame(matrix(NA, nrow=ns, ncol=5))
+    colnames(sa.stats) = c("param","mean","RMSE","Bias","cor")
+    theta_sa = as.data.frame(matrix(theta_ci[2,], nrow=ns, ncol=ncol(theta_ci), byrow=TRUE))
+    colnames(theta_sa) = colnames(params)
+    theta_sa[,i] = quantile(params[,i], seq(0,1,length=ns))
+    sa.ensemble = SSEM(X=Xbar, params=theta_sa, inputs=inputs)
+    sa.nee = sa.ensemble[,,6]
+    sa.stats[,"param"] = theta_sa[,i]
+    sa.stats[,"mean"] = apply(sa.nee,2,mean)
+    sa.stats[,"RMSE"] = apply(sa.nee[qaqc,],2,function(E){sqrt(mean((E-O)^2))})
+    sa.stats[,"Bias"] = apply(sa.nee[qaqc,],2,function(E){mean(E-O)})
+    sa.stats[,"cor"]  = apply(sa.nee[qaqc,],2,function(E){cor(E,O)})
+    sa.summary[i,,] = as.matrix(sa.stats)
+  }
+  return(sa.summary)
+}
+```
+Relies on globals: `params`, `X.orig`, `inputs`, `qaqc`, `O`. Returns array `[nparam × ns × 5]`.
+
+#### 4. `sens_plot()` — plot sensitivity results (lines 85–100)
+```r
+sens_plot = function(var, line=TRUE){
+  par(mfrow=c(3,3))
+  sens = rep(NA,9)
+  for(i in seq_len(nrow(sa.summary))){
+    plot(sa.summary[i,,1], sa.summary[i,,var], main=colnames(params)[i],
+         ylab=vname[var], type="b")
+    if(line){
+      m = lm(sa.summary[i,,var] ~ sa.summary[i,,1])
+      abline(m, col=2)
+      sens[i] = coef(m)[2] * mean(params[,i]) / mean(E)  ## elasticity
+    }
+  }
+  names(sens) = colnames(params)
+  return(sens)
+}
+```
+Relies on globals: `sa.summary`, `params`, `vname`, `E`. `var` indexes into the 3rd dim of `sa.summary` (1=param, 2=mean NEP, 3=RMSE, 4=Bias, 5=cor).
+
+#### 5. `average_timesteps()` — temporal aggregation helper (lines 138–159)
+```r
+average_timesteps <- function(arr, n_steps){
+  dims <- dim(arr)            # arr is [Time, Ensemble, Variable]
+  time_dim <- dims[1]
+  groups <- rep(1:ceiling(time_dim/n_steps), each=n_steps, length.out=time_dim)
+  time_list <- split(seq_len(time_dim), groups)
+  result_array <- sapply(time_list, function(idx){
+    apply(arr[idx,,,drop=FALSE], c(2,3), mean, na.rm=TRUE)
+  }, simplify="array")       # result: [Ensemble, Variable, Time]
+  corrected_array <- aperm(result_array, c(3,1,2))  # → [Time, Ensemble, Variable]
+  return(corrected_array)
+}
+```
+Averages a 3D `[time × ensemble × variable]` array into blocks of `n_steps` timesteps. Called by `plot_forecast(..., timestep=48)` to average to daily resolution.
+
+---
+
+### Key structural differences: Mike's SSEM.orig vs. local SSEM.orig
+
+| Feature | Mike's (2026 branch) | Local (our repo) |
+|---|---|---|
+| Time loop | Yes — loops over all `nt` timesteps internally | No — single-step function; `ensemble_forecast()` loops |
+| Timestep | Auto-detected from `median(diff(inputs$date))` | Passed as argument (default 1800) |
+| Process error | None — deterministic state updates | Yes — `rnorm()` in state update equations |
+| Output | 3D array `[nt × ne × 12]` | Matrix `[ne × 12]` (single step) |
+| `inputs` structure | data.frame with `date`, `temp`, `PAR` columns | data.frame with `temp`, `PAR` columns only |
+| `verbose` param | Yes (prints counter every 1440 steps) | No |
+
+**Functions in local that are absent from Mike's version:** `ensemble_forecast()`, `smooth.params()`, `ParticleFilter()` — these are our particle-filter machinery added for the automated NEON4cast workflow in `forecast.R`.
+
+---
+
+### forecast.R / do_prediction.yml
+
+`forecast.R` is the automated NEON4cast submission script (runs nightly via GitHub Actions). It:
+- Reads NEON targets from `https://data.ecoforecast.org/neon4cast-targets/terrestrial_30min/terrestrial_30min-targets.csv.gz`
+- Loads the latest `analysis/*.RDS` (particle filter analysis state)
+- Pulls NOAA stage2/3 met forecasts via `neon4cast::noaa_stage2/3()`
+- PAR conversion: `PAR[,Analysis$met] / 0.486` (same Campbell & Norman formula)
+- Runs `ensemble_forecast()` + `ParticleFilter()` per day in the reforecast window
+- Submits output via `neon4cast::submit()`
+
+This file is not relevant to the FluxCourse exercises — it is Mike's operational forecast infrastructure.
+
+---
+
 ## [2026-06-09] Fix: SSEM 95% CI ribbon — two bugs corrected in build_dashboard.R
 
 ### Approved changes
