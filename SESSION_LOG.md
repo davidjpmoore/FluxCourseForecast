@@ -864,3 +864,33 @@ Five targeted edits per Mike Dietze review:
 **Google Drive upload:** Replaced 703 MB Jun 9 version with 704 MB Jun 15 version
 - Destination: `FLUXCOURSE 2026 Shared Resources/Week 2 Instructional Materials/Tuesday_AM_SSEM_part1.zip`
 - Upload confirmed: 704 MB, timestamped 2026-06-15 09:02
+
+---
+
+## [2026-06-15] FluxCourseSiteExplorer.Rmd created for second PR to Mike's repo
+
+### Task: Create standalone parameterized site-explorer Rmd
+
+**File created:** `/tmp/mdietze_2026/FluxCourseSiteExplorer.Rmd` (775 lines)
+- Not yet committed to any branch; PR to mdietze/FluxCourseForecast pending.
+
+**Structure (8 sections):**
+1. Download — sources `data/download_site.R` if CSV absent; prints present/downloading message
+2. Prepare — sources `data/prepare_site.R`; unlocks rmarkdown `params` binding before sourcing
+3. Forward run & pre-calibration assessment — exact reproduction of Mike's assessment section (IC histograms, param plot, SSEM forward run, 6 diagnostic plots, skill score table pre row)
+4. Sensitivity — `nee.sensitivity()`, `sens_plot()`, elasticity table, cost function views, likelihood function, GA calibration (eval=have_GA, skipped if GA not installed)
+5. EKI calibration — 4 iterations, `impose.contraints()`, param comparison plot
+6. Post-calibration assessment — all timeseries, diurnal, P/O plots, skill score table post row
+7. FLUXCOM/CMIP6 comparison (new) — checks for site-specific files; if present plots annual GPP and NEE bar charts comparing SSEM pre/post, FLUXCOM, CESM2, IPSL-CM6A-LR, UKESM1-0-LL; if absent prints friendly message pointing to dashboard.html
+8. Next steps — Mike's next steps + dashboard pointer + render instructions + FLUXNET portal link
+
+**Collateral changes to `data/download_site.R` and `data/prepare_site.R`:**
+Added `if (!exists(...))` guards around `site_id`, `year`, and `data_dir` defaults
+so both scripts respect values pre-set by the parameterized Rmd instead of overwriting them.
+
+**Render test:** 48/48 chunks passed against US-MMS 2008 data.
+Output HTML: `/tmp/FluxCourseSiteExplorer_USMMS_2008.html` (10 MB)
+Notes:
+- GA not in project renv; Section 4.2 skipped gracefully via `eval=have_GA`
+- FLUXCOM columns are `GPP_gC_m2_d` / `NEE_gC_m2_d` (gC m-2 day-1), not kg C m-2 s-1
+- rmarkdown locks `params`; unlocked via `unlockBinding()` before sourcing prepare_site.R
