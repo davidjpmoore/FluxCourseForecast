@@ -726,3 +726,98 @@ Monthly, annual, and sub-daily panels are not affected.
 - `downsample(dd.dates, step)`: present in output HTML
 - `id="cb_ssem_ci" checked`: present in output HTML
 - File size: 7.5 MB (within 20 MB limit)
+
+## [2026-06-15] Task: Create site preparation scripts for FluxCourseModelCalib.Rmd
+
+### Task
+
+Created two parameterized scripts that let students use any AmeriFlux site
+with Mike Dietze's `FluxCourseModelCalib.Rmd` without modifying that Rmd
+(except one noted block in the Assessment chunk).
+
+### Script 1: data/download_site.R (new)
+
+Parameterized download script.  Students set `site_id` and `year` at the top
+and run it once to download the FLUXNET FULLSET product for any AmeriFlux site.
+
+Key design decisions:
+- Sets `RETICULATE_PYTHON=~/.virtualenvs/fluxnet/bin/python` via `Sys.setenv()`
+  before loading the fluxnet package (must precede any reticulate initialization).
+- Pins `EcosystemEcologyLab/fluxnet-package@v0.3.2` (first version that correctly
+  handles `_HR_` filenames from AmeriFlux FLUXNET v1.3_r1 products).
+- Detects `HR` vs `HH` manifest label automatically from `flux_discover_files()`.
+- Saves all resolutions (HH, DD, MM, ERA5_HR, ERA5_DD) to `data/{site_id}/`.
+- Sub-daily file always written as `{site_id}_HH.csv` regardless of product naming.
+- Falls back to `zip::unzip()` if `flux_extract()` fails.
+- Confirmation summary: key variable availability, year presence, file sizes.
+
+### Script 2: data/prepare_site.R (new)
+
+Parameterized preparation script that creates the exact objects Mike's Rmd expects.
+Students set `site_id`, `year`, `data_dir` at the top.
+
+**Objects produced:**
+
+| Object | Type | Description |
+|---|---|---|
+| `flux` | data.frame | Year-filtered FLUXNET CSV, −9999→NA, +`NEE_REF` columns |
+| `date` | POSIXct | Timestamp vector, same length as `nrow(flux)` |
+| `inputs` | data.frame | `date`, `temp` (TA_ERA), `PAR` (SW_IN_ERA/0.486) |
+| `nep` | numeric | `−flux$NEE_REF` |
+| `nep.qc` | numeric | `flux$NEE_REF_QC` |
+| `nep.unc` | numeric | `flux$NEE_REF_JOINTUNC` |
+| `X` | matrix | [ne × 3] initial C pool ensemble (leaf, wood, SOM; Mg/ha) |
+| `X.orig` | matrix | Copy of `X` before calibration overwrites it |
+| `params` | data.frame | [ne × 9] prior parameter ensemble, Mike's exact distributions |
+
+**Key design decisions:**
+- Handles two timestamp formats: `DATETIME_START` ISO 8601 (US-NR1 via flux_read)
+  and `TIMESTAMP_START` integer YYYYMMDDHHMM (US-MMS via extract_hr_workaround).
+- Detects HH vs HR CSV by checking `{site_id}_HH.csv` first, then `{site_id}_HR.csv`.
+- Auto-detects model `timestep` from `median(diff(date))` — same method as
+  Mike's `SSEM.orig` — so per-timestep param scaling is always correct.
+- NEE selection: prefers `NEE_VUT_REF`, falls back to `NEE_CUT_REF` with message
+  (Papale et al. 2006 note). Creates `flux$NEE_REF` (plus QC and JOINTUNC).
+- ERA5 drivers preferred (TA_ERA, SW_IN_ERA); falls back to TA_F / SW_IN_F with
+  warning and approximate PAR conversion factor (2.1 instead of 1/0.486).
+- US-NR1 initial conditions: exact BADM values from Mike's Rmd (Bwood=145 Mg/ha,
+  Bleaf=8.85 Mg/ha, SOM=22.7–28.9 Mg/ha from litter+CWD+soil).
+- Other sites: Bwood=100, Bleaf=3, SOM=100 Mg/ha (10% CV each), with note.
+- Parameter priors: Mike's exact code including rdirichlet, beta.match, and all
+  per-timestep scaling. Sources R/functions.R if not already loaded.
+- Final checklist: 40 checks over all objects; prints `[PASS]`/`[FAIL]` per check
+  and a summary with the one required Rmd modification.
+
+**The ONE required change to Mike's Assessment chunk:**
+```r
+# Original:
+nep     = -flux$NEE_VUT_REF
+nep.qc  = flux$NEE_VUT_REF_QC
+nep.unc = flux$NEE_VUT_REF_JOINTUNC
+# Modified:
+nep     = -flux$NEE_REF
+nep.qc  = flux$NEE_REF_QC
+nep.unc = flux$NEE_REF_JOINTUNC
+```
+
+### Test results
+
+**US-NR1 2015** (`data/US-NR1/US-NR1_HH.csv`, 490,896 rows → 17,520 after filter):
+- DATETIME_START format, timestep=1800 s (HH)
+- NEE_CUT_REF used (NEE_VUT_REF absent); CUT message printed
+- temp: −18.3 to 20.9 °C; PAR: 0–1826 umol/m2/s
+- Leaf=8.77, Wood=147.0, SOM=25.1 Mg/ha (US-NR1 BADM values)
+- **40/40 checks PASS**
+
+**US-MMS 2008** (`data/US-MMS/US-MMS_HR.csv`, 219,144 rows → 8,784 after filter):
+- TIMESTAMP_START format, timestep=3600 s (HR)
+- NEE_VUT_REF used (VUT method available)
+- temp: −16.4 to 32.8 °C; PAR: 0–1897 umol/m2/s
+- Default ICs (100/3/100 Mg/ha, 10% CV) with BADM note
+- **40/40 checks PASS**
+- Minor readr parsing warning on US-MMS_HR.csv (mixed-type columns in non-key
+  fields; does not affect any SSEM-relevant columns).
+
+### Files created
+- `data/download_site.R` — site download script
+- `data/prepare_site.R` — site preparation / object creation script
