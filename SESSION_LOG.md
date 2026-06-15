@@ -821,3 +821,27 @@ nep.unc = flux$NEE_REF_JOINTUNC
 ### Files created
 - `data/download_site.R` — site download script
 - `data/prepare_site.R` — site preparation / object creation script
+
+---
+
+## [2026-06-15] PR #4 opened + reviewer feedback addressed on fluxcourse-multisite-prep
+
+### Commits on fluxcourse-multisite-prep (pushed to davidjpmoore/FluxCourseForecast)
+
+**Commit 1deedae** — "Add multi-site data prep scripts and interactive dashboard"
+- `data/download_site.R` (new) — parameterized AmeriFlux/ICOS site download script
+- `data/prepare_site.R` (new) — creates all SSEM objects for any site; handles HH/HR timestep, ERA5 vs tower met, NEE_VUT_REF vs NEE_CUT_REF via `flux$NEE_REF`
+- `dashboard.html` (new) — self-contained offline interactive dashboard (9.1 MB)
+- `CLAUDE.md` (new) — project context for Claude Code
+- `FluxCourseModelCalib.Rmd` — 3 lines in Assessment chunk: `NEE_VUT_REF` → `NEE_REF`
+
+**PR #4** opened against mdietze/FluxCourseForecast base `2026`:
+https://github.com/mdietze/FluxCourseForecast/pull/4
+
+**Commit 50c322d** — "Address reviewer feedback on prepare_site.R"
+Five targeted edits per Mike Dietze review:
+1. Removed "ONE REQUIRED CHANGE TO MIKE'S RMD" header block (change is in PR)
+2. Increased generic IC CV from 10% → 50% in message and `rnorm()` calls
+3. Removed unused `SOM <- c(SOM, SOM)` line
+4. Replaced fake LMA vector (`1e3 / c(100, 150, 200)`) with direct SLA prior mean/SD (`SLA_mean=10, SLA_sd=3, SLA_badm=rnorm(10,...)`)
+5. Added note explaining that US-NR1 ICs are BADM-derived and generic defaults are intentionally broad
