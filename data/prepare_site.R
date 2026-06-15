@@ -16,12 +16,6 @@
 ##   X.orig      matrix      copy of X before any calibration changes it
 ##   params      data.frame  [ne × 9] prior parameter ensemble for SSEM
 ##
-## ONE REQUIRED CHANGE TO MIKE'S RMD (Assessment chunk only)
-## ----------------------------------------------------------
-##   Original  →  nep     = -flux$NEE_VUT_REF
-##   Modified  →  nep     = -flux$NEE_REF
-##   (and similarly for nep.qc and nep.unc; see §9 below)
-##
 ## PREREQUISITES
 ## -------------
 ##   1. Run data/download_site.R first to obtain {site_id}_HH.csv.
@@ -426,29 +420,37 @@ if (site_id == "US-NR1") {
 
   message(
     "Note: Using temperate forest DEFAULT initial conditions for ", site_id, ".\n",
-    "  Bwood = 100 Mg/ha (±10%),  Bleaf = 3 Mg/ha (±10%),  SOM = 100 Mg/ha (±10%)\n",
+    "  Bwood = 100 Mg/ha (±50%),  Bleaf = 3 Mg/ha (±50%),  SOM = 100 Mg/ha (±50%)\n",
     "  For best results, replace with site-specific BADM values:\n",
     "  https://ameriflux.lbl.gov/sites/siteinfo/", site_id, "#related"
   )
+
+  ## Note: The US-NR1 initial conditions above were derived from BADM biomass
+  ## and soil carbon measurements. For other sites, different data may be
+  ## available (e.g. forest inventory, soil surveys, remote sensing) that
+  ## would support different or more direct prior specifications. The generic
+  ## defaults here are intentionally broad to reflect this uncertainty.
 
   Bwood <- 100   # structural biomass (Mg/ha)
   Bleaf <- 3     # leaf biomass (Mg/ha)
   SOM   <- 100   # total soil organic matter (Mg/ha)
 
-  ## Generic SLA and litterfall for the parameter priors (§11)
-  SLA_badm       <- 1e3 / c(100, 150, 200)  # typical temperate forest LMA range
+  ## Generic SLA prior: temperate forest mean ~10 m2/kg, SD ~3 m2/kg
+  ## Replace with site-specific trait data where available (e.g. TRY database)
+  SLA_mean <- 10   # m2/kg
+  SLA_sd   <- 3    # m2/kg
+  SLA_badm <- rnorm(10, SLA_mean, SLA_sd)  # synthetic sample for mean/sd calls below
   litterfall_badm <- c(150) * 0.01 * 3       # ~150 gC/m2/yr → Mg/ha/yr
 
   X_mean <- c(Bleaf, Bwood, SOM)
   X <- as.matrix(X_mean)
   if (ne > 1) {
     X <- as.matrix(cbind(
-      rnorm(ne, Bleaf, Bleaf * 0.1),   # 10% CV assumed for all pools
-      rnorm(ne, Bwood, Bwood * 0.1),
-      rnorm(ne, SOM,   SOM   * 0.1)
+      rnorm(ne, Bleaf, Bleaf * 0.5),
+      rnorm(ne, Bwood, Bwood * 0.5),
+      rnorm(ne, SOM,   SOM   * 0.5)
     ))
   }
-  SOM <- c(SOM, SOM)  # make SOM a 2-element vector for sd() in §11 to work
 
 }
 
