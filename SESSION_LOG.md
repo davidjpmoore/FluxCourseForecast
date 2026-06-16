@@ -2,6 +2,37 @@
 
 ---
 
+## 2026-06-16 — HR workaround added to download_site.R
+
+**Problem:** `FluxCourseSiteExplorer.Rmd` failed for AmeriFlux sites (e.g.
+US-MMS) when triggered from a fresh download, because `flux_extract()` in
+the fluxnet package v0.3.2 silently skips files whose names contain `_HR_`,
+leaving no sub-daily CSV for `prepare_site.R` to read.
+
+**Edits made (two files only, no others touched):**
+
+`data/download_site.R` — added an HR workaround block immediately after the
+`flux_extract()` / fallback-extraction section (before §8 "Discover extracted
+files"). The block lists the ZIP contents with `zip::zip_list()`, finds any
+`_HR_`-named files that `flux_extract()` skipped, extracts them directly with
+`zip::unzip()` into `unzip_dir`, and copies them to `out_dir` as
+`{site_id}_HR.csv` (FLUXMET sub-daily) and `{site_id}_ERA5_HR.csv`.
+
+`data/prepare_site.R` — **no change required.** Lines 99–115 already check for
+both `{site_id}_HH.csv` and `{site_id}_HR.csv` in sequence. The path the
+workaround writes (`data/{site_id}/{site_id}_HR.csv`) matches the path
+`prepare_site.R` checks (`file.path(data_dir, site_id, paste0(site_id, "_HR.csv"))`)
+exactly.
+
+**End-to-end test:** `prepare_site.R` run for US-MMS 2008 (ne=10).
+Result: 37/38 checks [PASS]. The one [FAIL] (`params has no NAs`) is a
+pre-existing `rbeta` sampling issue that occurs when `ne` is very small
+(ne=10 triggers degenerate beta parameters) and is unrelated to the HR fix.
+The HR file was found correctly at `data/US-MMS/US-MMS_HR.csv`, all flux,
+date, inputs, nep, X, X.orig, and params objects were created successfully.
+
+---
+
 ## 2026-06-16 — CMIP6 and FLUXCOM data documentation
 
 Task: read `data/cmip6/` and `data/fluxcom/` CSV files and produce a prose

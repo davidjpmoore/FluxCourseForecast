@@ -186,6 +186,46 @@ if (!extract_ok) {
   message("Fallback extraction complete.")
 }
 
+## ── HR workaround ─────────────────────────────────────────────────────────────
+# The fluxnet package v0.3.2 filters for _HH_ filenames and silently skips
+# _HR_ files used in AmeriFlux FLUXNET v1.3_r1. Extract them directly from
+# the ZIP if present. This workaround can be removed when the package is fixed.
+# Tracked at: https://github.com/EcosystemEcologyLab/fluxnet-package/issues
+zip_path <- list.files(
+  raw_dir,
+  pattern = "\\.zip$", full.names = TRUE
+)[1]
+
+if (!is.na(zip_path) && file.exists(zip_path)) {
+  zip_contents <- zip::zip_list(zip_path)
+  hr_files <- zip_contents$filename[grepl("_HR_", zip_contents$filename)]
+  if (length(hr_files) > 0) {
+    message("HR workaround: extracting ", length(hr_files),
+            " sub-daily HR file(s) skipped by flux_extract()...")
+    zip::unzip(zip_path, files = hr_files, exdir = unzip_dir)
+    for (f in hr_files) {
+      extracted_path <- file.path(unzip_dir, f)
+      if (!file.exists(extracted_path)) {
+        extracted_path <- list.files(unzip_dir,
+                                     pattern = basename(f),
+                                     recursive = TRUE,
+                                     full.names = TRUE)[1]
+      }
+      dest_name <- if (grepl("ERA5", f)) {
+        paste0(site_id, "_ERA5_HR.csv")
+      } else {
+        paste0(site_id, "_HR.csv")
+      }
+      dest_path <- file.path(out_dir, dest_name)
+      if (!is.na(extracted_path) && file.exists(extracted_path)) {
+        file.copy(extracted_path, dest_path, overwrite = TRUE)
+        message("  Saved: ", dest_name, " (",
+                round(file.size(dest_path) / 1e6, 1), " MB)")
+      }
+    }
+  }
+}
+
 ## ---------------------------------------------------------------------------
 ## 8. Discover extracted files and detect sub-daily label (HR vs HH)
 ## ---------------------------------------------------------------------------
